@@ -843,6 +843,31 @@ async def reject_withdrawal(withdrawal_id: int, admin_id: int) -> tuple[str, Opt
         return "ok", w
 
 
+async def reject_all_withdrawals(admin_id: int) -> list[tuple[Withdrawal, User]]:
+    """Массово отклоняет ВСЕ заявки в ожидании (звёзды с балансов не списываются).
+
+    Один UPDATE по статусу pending: заявки, которые другой админ успел закрыть/отклонить, не затрагиваются,
+    а повторный вызов вернёт пустой список. -> [(заявка, пользователь)] только тех, что отклонены этим вызовом.
+    """
+    async with SessionLocal() as s:
+        now = utcnow()
+        res = await s.execute(
+            update(Withdrawal)
+            .where(Withdrawal.status == "pending")
+            .values(status="rejected", closed_at=now, closed_by=admin_id)
+        )
+        if not res.rowcount:
+            await s.rollback()
+            return []
+        await s.commit()
+        rows = await s.execute(
+            select(Withdrawal, User)
+            .join(User, User.id == Withdrawal.user_id)
+            .where(Withdrawal.status == "rejected", Withdrawal.closed_by == admin_id, Withdrawal.closed_at == now)
+            .order_by(Withdrawal.id)
+        )
+        return [(r[0], r[1]) for r in rows.all()]
+
 
 # ───────────── чеки ─────────────
 def check_channels(chk: Check) -> list[dict]:
@@ -1048,6 +1073,13 @@ def _(res, withdrawal_id, admin_id, *a, **kw):
     status, w = res
     audit.event(w.user_id if w else 0, "WD_REJ" if status == "ok" else "WD_ERR",
                 f"заявка №{withdrawal_id} {_stars(w.amount) if w else ''} отклонил админ {admin_id} [{status}]")
+
+
+@_audited("reject_all_withdrawals")
+def _(res, admin_id, *a, **kw):
+    for w, _u in res:
+        audit.event(w.user_id, "WD_REJ", f"заявка №{w.id} {_stars(w.amount)} отклонил админ {admin_id} [массово]")
+    audit.event(admin_id, "WD_REJ", f"массово отклонено заявок: {len(res)}")
 
 
 @_audited("set_banned")

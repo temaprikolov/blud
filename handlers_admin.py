@@ -1157,14 +1157,19 @@ def wd_detail_text(w, user, closer: str | None = None) -> str:
     return notify.request_text(w, user, closer)
 
 
+async def _show_wd_list(cb: CallbackQuery) -> None:
+    items = await services.list_withdrawals("pending", limit=30)
+    total = await services.pending_withdrawal_count()
+    text = f"💫 <b>Заявки на вывод</b>\n{LINE}\n\n"
+    text += f"⏳ Ожидают обработки: <b>{total}</b>" if total else "Новых заявок нет 👌"
+    await show(cb, text, kb.wd_list_kb(items, reject_all=total))
+
+
 @router.callback_query(F.data == "a:wd_list")
 async def cb_wd_list(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    items = await services.list_withdrawals("pending", limit=30)
     await cb.answer()
-    text = f"💫 <b>Заявки на вывод</b>\n{LINE}\n\n"
-    text += f"⏳ Ожидают обработки: <b>{len(items)}</b>" if items else "Новых заявок нет 👌"
-    await show(cb, text, kb.wd_list_kb(items))
+    await _show_wd_list(cb)
 
 
 @router.callback_query(F.data == "a:wd_hist")
@@ -1255,6 +1260,98 @@ async def cb_wd_reject(cb: CallbackQuery, bot: Bot) -> None:
         )
     except TelegramAPIError:
         pass
+
+
+# ── массовое отклонение всех заявок в ожидании ──
+@router.callback_query(F.data == "a:wd_all")
+async def cb_wd_all(cb: CallbackQuery) -> None:
+    total = await services.pending_withdrawal_count()
+    if not total:
+        await cb.answer("Заявок в ожидании нет", show_alert=True)
+        await _show_wd_list(cb)
+        return
+    await cb.answer()
+    await show(
+        cb,
+        f"🗑 <b>Отклонить все заявки</b>\n{LINE}\n\n"
+        f"⏳ В ожидании: <b>{total}</b>\n\n"
+        "Звёзды с балансов не списываются — все заявки уйдут в историю как отклонённые.\n\n"
+        "Сообщить пользователям об отказе?",
+        kb.wd_reject_all_kb(),
+    )
+
+
+async def _tg_call(call) -> bool:
+    """Вызов Telegram API с ожиданием при флуд-лимите. True — удалось, прочие ошибки глотаем."""
+    for _attempt in range(3):
+        try:
+            await call()
+            return True
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except TelegramAPIError:
+            return False
+    return False
+
+
+async def _run_wd_reject_all(bot: Bot, admin_id: int, rejected: list, notify_users: bool) -> None:
+    closer = await _closer_name(admin_id)
+    # 1) у всех админов обновляем сообщения о заявках и убираем кнопки
+    for w, user in rejected:
+        try:
+            await notify.refresh_notices(bot, w, user, closer)
+        except Exception:  # noqa: BLE001 — сбой одной заявки не должен останавливать остальные
+            log.exception("не удалось обновить сообщения по заявке %s", w.id)
+        await asyncio.sleep(0.1)
+    if not notify_users:
+        return
+    # 2) уведомляем пользователей (одно сообщение на человека, даже если у него несколько заявок)
+    by_user: dict[int, list] = {}
+    for w, _user in rejected:
+        by_user.setdefault(w.user_id, []).append(w)
+    tail = "Звёзды с баланса не списаны. Если это ошибка — создай заявку заново или обратись к администратору."
+    delivered = failed = 0
+    for uid, ws in by_user.items():
+        if len(ws) == 1:
+            text = f"❌ <b>Заявка №{ws[0].id} отклонена</b>\n\n{tail}"
+        else:
+            nums = ", ".join(f"№{w.id}" for w in ws)
+            text = f"❌ <b>Заявки отклонены ({len(ws)})</b>\n{nums}\n\n{tail}"
+        if await _tg_call(lambda: bot.send_message(uid, text)):
+            delivered += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)  # ~20 сообщений в секунду
+    await _tg_call(
+        lambda: bot.send_message(
+            admin_id,
+            f"✅ Пользователи уведомлены\n\nДоставлено: <b>{delivered}</b>\nНе доставлено (заблокировали бота и т.п.): {failed}",
+        )
+    )
+
+
+@router.callback_query(F.data.in_({"a:wd_all:silent", "a:wd_all:notify"}))
+async def cb_wd_all_do(cb: CallbackQuery, bot: Bot) -> None:
+    notify_users = cb.data.endswith(":notify")
+    rejected = await services.reject_all_withdrawals(cb.from_user.id)
+    if not rejected:  # уже обработал другой админ / нажали повторно
+        await cb.answer("Заявок в ожидании нет", show_alert=True)
+        await _show_wd_list(cb)
+        return
+    await cb.answer(f"Отклонено заявок: {len(rejected)}")
+    await show(
+        cb,
+        f"✅ <b>Отклонено заявок: {len(rejected)}</b>\n{LINE}\n\n"
+        + (
+            "🔔 Пользователям отправляются уведомления — пришлю итог, когда закончу."
+            if notify_users
+            else "🔕 Пользователи не уведомлены."
+        ),
+        kb.back("a:wd_list", "⬅️ К заявкам"),
+    )
+    task = asyncio.create_task(_run_wd_reject_all(bot, cb.from_user.id, rejected, notify_users))
+    _bg_tasks.add(task)  # иначе сборщик мусора может убить задачу
+    task.add_done_callback(_bg_tasks.discard)
 
 
 @router.callback_query(F.data.startswith("a:user:"))

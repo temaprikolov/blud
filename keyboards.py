@@ -200,18 +200,31 @@ def wd_request_kb(withdrawal_id: int, user_id: int) -> Kb:
     )
 
 
-def wd_list_kb(items, back_to: str = "a:menu", history: bool = False) -> Kb:
-    """items: [(Withdrawal, User)]"""
+def wd_list_kb(items, back_to: str = "a:menu", history: bool = False, reject_all: int = 0) -> Kb:
+    """items: [(Withdrawal, User)]; reject_all — сколько заявок в ожидании (>0 → кнопка «Отклонить все»)."""
     rows = []
     for w, u in items:
         mark = {"pending": "⏳", "done": "✅", "rejected": "❌"}[w.status]
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))[:20]
         rows.append([B(f"{mark} №{w.id} · {who} · {fmt_short(w.amount)} ⭐", f"a:wd:{w.id}", style=P if not history else None)])
+    if reject_all and not history:
+        rows.append([B(f"🗑 Отклонить все ({reject_all})", "a:wd_all", style=R)])
     rows.append(
         [B("🕘 История", "a:wd_hist", style=P)] if not history else [B("⏳ Ожидающие", "a:wd_list", style=R)]
     )
     rows.append([B("⬅️ Назад", back_to)])
     return Kb(inline_keyboard=rows)
+
+
+def wd_reject_all_kb() -> Kb:
+    """Массовое отклонение: выбор — с уведомлением пользователей или без."""
+    return Kb(
+        inline_keyboard=[
+            [B("🔕 Отклонить все — без уведомления", "a:wd_all:silent", style=R)],
+            [B("🔔 Отклонить все — с уведомлением", "a:wd_all:notify", style=R)],
+            [B("✖️ Отмена", "a:wd_list")],
+        ]
+    )
 
 
 def wd_detail_kb(withdrawal_id: int, user_id: int, pending: bool) -> Kb:

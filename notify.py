@@ -1,10 +1,11 @@
 """Уведомления по заявкам на вывод: админам — о новой заявке, и обновление этих сообщений после закрытия."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 
 import config
 import fraud
@@ -52,7 +53,12 @@ async def refresh_notices(bot: Bot, w, user, closer: str | None) -> None:
     """После закрытия/отклонения обновляет сообщение о заявке у всех админов и убирает кнопки."""
     text = request_text(w, user, closer, await fraud.score(user.id))
     for n in await services.withdrawal_notices(w.id):
-        try:
-            await bot.edit_message_text(text, chat_id=n.admin_id, message_id=n.message_id)
-        except TelegramAPIError:
-            pass  # не изменилось / сообщение удалено — не страшно
+        for _attempt in range(3):
+            try:
+                await bot.edit_message_text(text, chat_id=n.admin_id, message_id=n.message_id)
+            except TelegramRetryAfter as e:  # флуд-лимит при массовом отклонении — ждём и повторяем
+                await asyncio.sleep(e.retry_after + 1)
+                continue
+            except TelegramAPIError:
+                pass  # не изменилось / сообщение удалено — не страшно
+            break
