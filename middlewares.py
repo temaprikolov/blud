@@ -27,6 +27,8 @@ _waiting: set[int] = set()  # кто сейчас ждёт — чтобы пов
 # Ссылка на чек, открытая до подписки на обязательные каналы: user_id -> код чека.
 # Нужна, чтобы после «Я подписался» чек активировался сам, а не терялся.
 PENDING_CHECKS: dict[int, str] = {}
+# «Старый друг»: user_id -> (referrer_id, время). Заполняется ДО register_user (тот обновляет last_active), оплата — когда человек прошёл все стены подписки.
+PENDING_OLD_REFS: dict[int, tuple[int, float]] = {}
 
 
 async def is_member(bot: Bot, chat_id: int, user_id: int) -> Optional[bool]:
@@ -109,6 +111,13 @@ class AccessMiddleware(BaseMiddleware):
                 PENDING_CHECKS[tg_user.id] = payload[4:]
             else:
                 PENDING_CHECKS.pop(tg_user.id, None)
+
+        if referrer_id:  # старый друг: проверяем неактивность до того, как заход обновит last_active
+            try:
+                if await services.old_referral_eligible(tg_user.id, referrer_id):
+                    PENDING_OLD_REFS[tg_user.id] = (referrer_id, time.time())
+            except Exception as e:  # noqa: BLE001 — не должно ломать вход
+                log.warning("old referral check: %s", e)
 
         user, created = await services.register_user(tg_user, referrer_id)
         data["user"] = user
@@ -197,6 +206,8 @@ class AccessMiddleware(BaseMiddleware):
                     from handlers_user import menu_text  # noqa: E402
                     fresh = await services.get_user(tg_user.id)
                     await msg.answer(menu_text(fresh), reply_markup=kb.main_menu(False))
+                    from handlers_user import claim_old_ref  # noqa: E402
+                    await claim_old_ref(bot, fresh)
                     return None
 
         return await handler(event, data)

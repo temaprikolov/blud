@@ -193,6 +193,18 @@ class FraudEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class OldReferral(Base):
+    """Награда за «старого друга»: уже был в боте, но неделю не заходил. Один человек — один раз за всё время (unique invited_id)."""
+
+    __tablename__ = "old_referrals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    inviter_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    invited_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    amount: Mapped[int] = mapped_column(Integer)  # сотые доли звезды
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class Setting(Base):
     """Настройки, которые админ меняет из бота (награды, суммы вывода, контакт)."""
 

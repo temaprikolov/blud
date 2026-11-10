@@ -22,6 +22,7 @@ def _forget_runtime(uid: int) -> None:
 
     middlewares.forget_sub_cache(uid)
     middlewares.PENDING_CHECKS.pop(uid, None)
+    middlewares.PENDING_OLD_REFS.pop(uid, None)
 
 
 def report_text(report: dict) -> str:

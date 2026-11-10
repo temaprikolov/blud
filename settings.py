@@ -13,6 +13,8 @@ DEFAULTS: dict[str, str] = {
     "withdraw_amounts": ",".join(str(a) for a in config.WITHDRAW_AMOUNTS),
     "withdraw_term": config.WITHDRAW_TERM,
     "task_rate": str(config.TASKS_PER_MINUTE),
+    "old_ref_reward": str(config.OLD_REF_REWARD),
+    "old_ref_days": str(config.OLD_REF_DAYS),
 }
 
 _cache: dict[str, str] = dict(DEFAULTS)
@@ -54,6 +56,14 @@ def ref_tasks() -> int:
 
 def task_rate() -> int:
     return int(_cache["task_rate"])
+
+
+def old_ref_reward() -> int:
+    return int(_cache["old_ref_reward"])
+
+
+def old_ref_days() -> int:
+    return int(_cache["old_ref_days"])
 
 
 def withdraw_amounts() -> tuple[int, ...]:

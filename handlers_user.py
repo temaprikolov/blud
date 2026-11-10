@@ -4,6 +4,7 @@ import asyncio
 import logging
 import secrets
 import time
+from datetime import timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -20,7 +21,7 @@ import moderation
 import services
 import settings
 import sponsors
-from middlewares import PENDING_CHECKS, forget_sub_cache, is_member
+from middlewares import PENDING_CHECKS, PENDING_OLD_REFS, forget_sub_cache, is_member
 from utils import _bold, bar, esc, fmt_short, fmt_stars, mention, public_name
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,32 @@ class UserS(StatesGroup):
     check_password = State()
 
 
+# ───────────── старый друг ─────────────
+async def claim_old_ref(bot: Bot, user) -> None:
+    """Платит рефереру за «старого друга», когда тот прошёл стены подписки (см. services.old_referral_eligible)."""
+    pend = PENDING_OLD_REFS.pop(user.id, None)
+    if not pend or time.time() - pend[1] > 3600:
+        return
+    referrer_id = pend[0]
+    try:
+        res = await services.pay_old_referral(user.id, referrer_id)
+        if not res:
+            return
+        if res.get("burst"):
+            await fraud.add_event(referrer_id, "ref_burst", "пачка старых друзей", within=timedelta(minutes=10))
+            await moderation.evaluate(bot, referrer_id)
+            return
+        await bot.send_message(
+            referrer_id,
+            f"🕰 <b>Старый друг вернулся!</b>\n\n{mention(user)} снова в боте по твоей ссылке.\n"
+            f"Тебе начислено <b>{fmt_short(res['reward'])} ⭐</b>",
+        )
+    except TelegramAPIError:
+        pass
+    except Exception as e:  # noqa: BLE001 — награда за старого друга не должна ломать вход
+        log.warning("old referral pay: %s", e)
+
+
 # ───────────── старт / меню ─────────────
 @router.message(CommandStart())
 async def cmd_start(message: Message, user, is_admin: bool, state: FSMContext, bot: Bot) -> None:
@@ -76,6 +103,7 @@ async def cmd_start(message: Message, user, is_admin: bool, state: FSMContext, b
         return
     fresh = await services.get_user(user.id)
     await message.answer(menu_text(fresh), reply_markup=kb.main_menu(is_admin))
+    await claim_old_ref(bot, fresh)
 
 
 @router.callback_query(F.data.in_({"menu", "check_sub"}))
@@ -93,6 +121,7 @@ async def cb_menu(cb: CallbackQuery, user, is_admin: bool, state: FSMContext, bo
         code = PENDING_CHECKS.pop(user.id, None)
         if code:  # человек открыл чек до подписки — активируем теперь
             await process_check(bot, state, user, code, cb.message.answer)
+        await claim_old_ref(bot, fresh)
 
 
 # ───────────── чеки ─────────────
@@ -392,6 +421,7 @@ async def cb_task_skip(cb: CallbackQuery, user) -> None:
 @router.callback_query(F.data == "refs")
 async def cb_refs(cb: CallbackQuery, user) -> None:
     total, counted = await services.referral_counts(user.id)
+    old_count = await services.old_referral_count(user.id)
     fresh = await services.get_user(user.id)
     link = f"https://t.me/{config.BOT_USERNAME}?start=ref_{user.id}"
     await cb.answer()
@@ -402,9 +432,14 @@ async def cb_refs(cb: CallbackQuery, user) -> None:
         f"├ За приглашённого друга — <b>{fmt_short(settings.ref_reward())} ⭐</b>\n"
         "├ Друг должен перейти по твоей ссылке\n"
         f"└ И выполнить {settings.ref_tasks()} заданий от спонсоров\n\n"
+        f"🕰 <b>Старый друг — {fmt_short(settings.old_ref_reward())} ⭐</b>\n"
+        f"├ Друг уже был в боте, но {settings.old_ref_days()}+ дней не заходил\n"
+        "├ За это время: без заданий, новых рефералов и выводов\n"
+        "└ Награда — как только он перейдёт по твоей ссылке и пройдёт подписки\n\n"
         f"🔗 Твоя ссылка:\n<code>{link}</code>\n\n"
         f"👥 Всего приглашено: <b>{total}</b>\n"
         f"✅ Засчитано: <b>{counted}</b>\n"
+        f"🕰 Старых друзей вернул: <b>{old_count}</b>\n"
         f"🎁 Заработано на друзьях: <b>{fmt_stars(fresh.ref_earned)} ⭐</b>\n\n"
         f"💰 Баланс: <b>{fmt_stars(fresh.balance)} ⭐️</b>\n\n"
         "⚠️ <i>Награда начисляется только после успешной проверки выполненных заданий.</i>",

@@ -1,9 +1,11 @@
 """Вся работа с БД. Суммы везде в сотых долях звезды."""
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import secrets
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -13,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 import config
 import fraud
 import settings
-from db import Channel, ChannelMiss, ChannelPass, Check, CheckActivation, SessionLocal, Task, Transaction, User, UserTask, Withdrawal, WithdrawalNotice, utcnow
+from db import Channel, ChannelMiss, ChannelPass, Check, CheckActivation, FraudEvent, OldReferral, SessionLocal, Task, Transaction, User, UserTask, Withdrawal, WithdrawalNotice, utcnow
 
 
 # ───────────────────────── пользователи ─────────────────────────
@@ -155,6 +157,20 @@ async def purge_user_data(user_id: int) -> dict:
                     referrer.balance -= back
                     s.add(Transaction(user_id=referrer.id, amount=-back, kind="clawback", note=f"возврат награды: друг {user_id} забанен"))
                 report["clawback"], report["referrer_id"] = back, referrer.id
+
+        # награда за «старого друга» тоже возвращается; запись в old_referrals остаётся — повторно за него не заплатим
+        old_ref = (await s.execute(select(OldReferral).where(OldReferral.invited_id == user_id))).scalars().first()
+        if old_ref:
+            inviter = await s.get(User, old_ref.inviter_id)
+            if inviter:
+                back = min(old_ref.amount, inviter.balance)
+                inviter.earned = max(0, inviter.earned - old_ref.amount)
+                inviter.ref_earned = max(0, inviter.ref_earned - old_ref.amount)
+                if back > 0:
+                    inviter.balance -= back
+                    s.add(Transaction(user_id=inviter.id, amount=-back, kind="clawback", note=f"возврат награды: старый друг {user_id} забанен"))
+                    report["clawback"] += back
+                    report["referrer_id"] = report["referrer_id"] or inviter.id
         await s.commit()
     return report
 
@@ -171,6 +187,139 @@ async def referral_counts(user_id: int) -> tuple[int, int]:
             )
         ).one()
         return int(row[0]), int(row[1])
+
+
+# ───────────────────────── старые друзья ─────────────────────────
+async def old_referral_eligible(user_id: int, referrer_id: int) -> bool:
+    """Можно ли засчитать user_id как «старого друга» для referrer_id.
+
+    ВАЖНО: вызывать ДО register_user — он обновляет last_active при любом заходе, и «неделю не заходил» уже не проверить.
+    Условия: человек уже есть в базе, не админ и не забанен; не приглашал его же этот реферер раньше (он и так его реферал);
+    за последние N дней (настройка, по умолчанию 7) — не заходил в бота вообще, не делал заданий, не приводил новых рефералов
+    и не создавал заявок на вывод; за него ещё ни разу не платили (один человек — одна награда за всё время).
+    """
+    if not referrer_id or referrer_id == user_id or user_id in config.ADMIN_IDS:
+        return False
+    cutoff = utcnow() - timedelta(days=settings.old_ref_days())
+    async with SessionLocal() as s:
+        user, referrer = await s.get(User, user_id), await s.get(User, referrer_id)
+        if not user or not referrer or user.is_banned or referrer.is_banned:
+            return False
+        if user.referrer_id == referrer_id or user.last_active > cutoff:
+            return False
+
+        async def has(q) -> bool:
+            return bool(await s.scalar(q))
+
+        if await has(select(func.count(OldReferral.id)).where(OldReferral.invited_id == user_id)):
+            return False
+        if await has(select(func.count(UserTask.id)).where(UserTask.user_id == user_id, UserTask.created_at > cutoff)):
+            return False
+        if await has(select(func.count(User.id)).where(User.referrer_id == user_id, User.created_at > cutoff)):
+            return False
+        if await has(select(func.count(Withdrawal.id)).where(Withdrawal.user_id == user_id, Withdrawal.created_at > cutoff)):
+            return False
+    return True
+
+
+async def pay_old_referral(user_id: int, referrer_id: int) -> Optional[dict]:
+    """Начисляет награду за старого друга. None — нельзя (бан, подозрение, уже платили).
+    {'burst': True} — слишком много старых друзей за 10 минут (ничего не начислено, нужно отметить фрод)."""
+    reward = settings.old_ref_reward()
+    async with SessionLocal() as s:
+        user, referrer = await s.get(User, user_id), await s.get(User, referrer_id)
+        if not user or not referrer or user.is_banned or referrer.is_banned:
+            return None
+        if await fraud.score(referrer_id, s) >= config.FRAUD_HOLD or await fraud.score(user_id, s) >= config.FRAUD_HOLD:
+            return None
+        recent = await s.scalar(
+            select(func.count(OldReferral.id)).where(OldReferral.inviter_id == referrer_id, OldReferral.created_at >= utcnow() - timedelta(minutes=10))
+        )
+        if int(recent or 0) >= config.FRAUD_REF_BURST:
+            return {"burst": True}
+
+        s.add(OldReferral(inviter_id=referrer_id, invited_id=user_id, amount=reward))
+        try:
+            await s.flush()
+        except IntegrityError:  # параллельный /start — уже заплатили
+            await s.rollback()
+            return None
+        await s.execute(
+            update(User)
+            .where(User.id == referrer_id)
+            .values(balance=User.balance + reward, earned=User.earned + reward, ref_earned=User.ref_earned + reward)
+        )
+        s.add(Transaction(user_id=referrer_id, amount=reward, kind="referral_old", note=f"старый друг {user_id}"))
+        await s.commit()
+    return {"reward": reward, "referrer_id": referrer_id}
+
+
+async def old_referral_count(user_id: int) -> int:
+    async with SessionLocal() as s:
+        return int(await s.scalar(select(func.count(OldReferral.id)).where(OldReferral.inviter_id == user_id)) or 0)
+
+
+# ───────────────────────── полный сброс ─────────────────────────
+def _backup_db() -> Optional[str]:
+    """Копия SQLite-базы перед сбросом (bot.db-backup-ГГГГММДД-ЧЧММСС — под .gitignore `bot.db-*`)."""
+    if not config.DB_URL.startswith("sqlite"):
+        return None
+    src = config.DB_URL.split("///", 1)[-1]
+    dst = f"{src}-backup-{utcnow():%Y%m%d-%H%M%S}"
+    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
+        a.backup(b)
+    return dst
+
+
+async def reset_preview() -> dict:
+    """Сколько всего будет затронуто сбросом (для подтверждения)."""
+    async with SessionLocal() as s:
+        non_admin = User.id.not_in(config.ADMIN_IDS)
+        return {
+            "users": int(await s.scalar(select(func.count(User.id)).where(non_admin)) or 0),
+            "balance": int(await s.scalar(select(func.coalesce(func.sum(User.balance), 0)).where(non_admin)) or 0),
+            "earned": int(await s.scalar(select(func.coalesce(func.sum(User.earned), 0)).where(non_admin)) or 0),
+            "tasks": int(await s.scalar(select(func.coalesce(func.sum(User.tasks_done), 0)).where(non_admin)) or 0),
+            "wd_pending": int(await s.scalar(select(func.count(Withdrawal.id)).where(Withdrawal.user_id.not_in(config.ADMIN_IDS), Withdrawal.status == "pending")) or 0),
+            "wd_all": int(await s.scalar(select(func.count(Withdrawal.id)).where(Withdrawal.user_id.not_in(config.ADMIN_IDS))) or 0),
+        }
+
+
+async def reset_all_users() -> dict:
+    """Обнуляет ВСЕХ, кроме админов (ADMIN_IDS): звёзды, статистику, историю — как будто только что зашли в бота. Одной транзакцией,
+    перед этим — копия базы. Остаются: сами аккаунты (ник, Premium), баны и «скрыт из топа», отметки подписок на каналы, «доверенный»,
+    дата регистрации. Реферальная связь сохраняется только у тех, кого пригласил админ (чтобы не менять статистику админов)."""
+    backup = await asyncio.to_thread(_backup_db)
+    admins = config.ADMIN_IDS
+    report: dict = {"backup": backup, "notices": []}
+    async with SessionLocal() as s:
+        report["preview"] = await reset_preview()
+        wd_ids = list((await s.execute(select(Withdrawal.id).where(Withdrawal.user_id.not_in(admins)))).scalars())
+        if wd_ids:
+            notices = list((await s.execute(select(WithdrawalNotice).where(WithdrawalNotice.withdrawal_id.in_(wd_ids)))).scalars())
+            report["notices"] = [(n.admin_id, n.message_id) for n in notices]
+            await s.execute(delete(WithdrawalNotice).where(WithdrawalNotice.withdrawal_id.in_(wd_ids)))
+            await s.execute(delete(Withdrawal).where(Withdrawal.id.in_(wd_ids)))
+        await s.execute(delete(Transaction).where(Transaction.user_id.not_in(admins)))
+        await s.execute(delete(UserTask).where(UserTask.user_id.not_in(admins)))
+        await s.execute(delete(CheckActivation).where(CheckActivation.user_id.not_in(admins)))
+        await s.execute(update(Check).values(activations=select(func.count(CheckActivation.id)).where(CheckActivation.check_id == Check.id).scalar_subquery()))
+        await s.execute(delete(OldReferral).where(OldReferral.inviter_id.not_in(admins)))
+        await s.execute(delete(FraudEvent).where(FraudEvent.user_id.not_in(admins), FraudEvent.kind.not_in(("trusted", "premium"))))
+
+        # реферальная связь: убираем у всех, кроме приглашённых админами
+        await s.execute(
+            update(User)
+            .where(User.id.not_in(admins), or_(User.referrer_id.is_(None), User.referrer_id.not_in(admins)))
+            .values(referrer_id=None, ref_counted=False, ref_top_counted=False)
+        )
+        await s.execute(
+            update(User)
+            .where(User.id.not_in(admins))
+            .values(balance=0, earned=0, ref_earned=0, tasks_done=0, tasks_skipped=0)
+        )
+        await s.commit()
+    return report
 
 
 async def withdrawn_total(user_id: int) -> int:
@@ -1108,3 +1257,17 @@ def _(res, tg_user, referrer_id=None, *a, **kw):
     user, created = res
     if created:
         audit.event(tg_user.id, "NEW", f"новый пользователь" + (f", пригласил {user.referrer_id}" if user.referrer_id else ""))
+
+
+@_audited("pay_old_referral")
+def _(res, user_id, referrer_id, *a, **kw):
+    if res and res.get("reward"):
+        audit.event(referrer_id, "REF_OLD", f"+{_stars(res['reward'])} за старого друга {user_id}")
+    elif res and res.get("burst"):
+        audit.event(referrer_id, "REF_OLD", f"отказ: пачка старых друзей, друг {user_id}")
+
+
+@_audited("reset_all_users")
+def _(res, *a, **kw):
+    p = res.get("preview", {})
+    audit.event(0, "RESET", f"сброс всех кроме админов: {p.get('users', 0)} чел., баланс {_stars(p.get('balance', 0))}, бэкап {res.get('backup')}")

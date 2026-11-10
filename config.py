@@ -41,6 +41,9 @@ TASK_REWARD = 49
 REF_REWARD = 1100
 REF_TASKS_REQUIRED = 5
 TASKS_PER_MINUTE = 2  # кулдаун: не больше N выполненных заданий в минуту
+# Старые друзья: приглашённый уже был в боте, но не заходил и ничего не делал OLD_REF_DAYS дней
+OLD_REF_REWARD = 150  # 1.5 ⭐ в сотых долях
+OLD_REF_DAYS = 7
 
 # Спонсорские подписки (ОП). Пустой ключ — сеть выключена.
 TRAFFY_API_KEY = os.getenv("TRAFFY_API_KEY", "").strip()  # pk_live_...

@@ -313,6 +313,50 @@ async def cmd_hidetop(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+RESET_WORD = "ОБНУЛИТЬ"
+
+
+@router.message(Command("resetall"))
+async def cmd_resetall(message: Message, bot: Bot) -> None:
+    """/resetall — предпросмотр; /resetall ОБНУЛИТЬ — сбросить звёзды и статистику всех, кроме админов (с копией базы)."""
+    parts = (message.text or "").split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) == 2 else ""
+    if arg != RESET_WORD:
+        pv = await services.reset_preview()
+        await message.answer(
+            "⚠️ <b>Полный сброс всех, кроме админов</b>\n\n"
+            f"👥 Аккаунтов: <b>{pv['users']}</b>\n"
+            f"💰 Баланс, который сгорит: <b>{fmt_stars(pv['balance'])} ⭐</b>\n"
+            f"🎯 Заданий в статистике: <b>{pv['tasks']}</b>\n"
+            f"💫 Заявок на вывод будет удалено: <b>{pv['wd_all']}</b> (из них в ожидании: <b>{pv['wd_pending']}</b>)\n\n"
+            "Обнулится: баланс, заработано, задания, рефералы, история операций, заявки на вывод, активации чеков, очки фрода.\n"
+            "Останется: ники, баны, «скрыт из топа», подписки на каналы, «доверенные», дата регистрации.\n"
+            "Перед сбросом бот сохранит копию базы рядом с bot.db.\n\n"
+            f"Чтобы выполнить, отправь:\n<code>/resetall {RESET_WORD}</code>"
+        )
+        return
+    wait = await message.answer("⏳ Делаю копию базы и обнуляю…")
+    try:
+        rep = await services.reset_all_users()
+    except Exception as e:  # noqa: BLE001
+        log.exception("resetall failed")
+        await wait.edit_text(f"❌ Сброс не выполнен (база не изменена): <code>{esc(str(e))}</code>")
+        return
+    for admin_id, message_id in rep["notices"]:  # убираем у админов сообщения об удалённых заявках
+        try:
+            await bot.delete_message(admin_id, message_id)
+        except TelegramAPIError:
+            pass
+    pv = rep["preview"]
+    await wait.edit_text(
+        "✅ <b>Все аккаунты, кроме админских, обнулены</b>\n\n"
+        f"👥 Аккаунтов: <b>{pv['users']}</b>\n"
+        f"💰 Сгорело на балансах: <b>{fmt_stars(pv['balance'])} ⭐</b>\n"
+        f"💫 Заявок удалено: <b>{pv['wd_all']}</b>\n"
+        f"🗄 Копия базы: <code>{esc(str(rep['backup']))}</code>"
+    )
+
+
 @router.callback_query(F.data.startswith("a:trust:"))
 async def cb_trust(cb: CallbackQuery) -> None:
     """«Это не фрод»: сбрасываем очки и больше не считаем подозрительным (награды и вывод размораживаются)."""
@@ -1050,6 +1094,8 @@ HINTS = {
     "ref_reward": "число звёзд, например <code>11</code>",
     "ref_tasks": "целое число заданий, например <code>5</code>",
     "task_rate": "целое число заданий в минуту, например <code>2</code>",
+    "old_ref_reward": "число звёзд, например <code>1.5</code>",
+    "old_ref_days": "целое число дней, например <code>7</code>",
     "withdraw_amounts": "суммы через запятую, например <code>15, 25, 50, 100</code>",
     "withdraw_term": "текст, например <code>до 48 часов</code>",
 }
@@ -1075,13 +1121,15 @@ async def cb_setting_edit(cb: CallbackQuery, state: FSMContext) -> None:
 def parse_setting(key: str, text: str) -> str | None:
     """Возвращает значение для хранения или None, если ввод некорректен."""
     text = (text or "").strip()
-    if key in ("task_reward", "ref_reward"):
+    if key in ("task_reward", "ref_reward", "old_ref_reward"):
         cents = parse_stars(text)
         return str(cents) if cents else None
     if key == "ref_tasks":
         return str(int(text)) if text.isdigit() and 1 <= int(text) <= 100 else None
     if key == "task_rate":
         return str(int(text)) if text.isdigit() and 1 <= int(text) <= 60 else None
+    if key == "old_ref_days":
+        return str(int(text)) if text.isdigit() and 1 <= int(text) <= 365 else None
     if key == "withdraw_amounts":
         parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
         if not parts or len(parts) > 8 or not all(p.isdigit() and 1 <= int(p) <= 100000 for p in parts):

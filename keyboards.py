@@ -152,6 +152,8 @@ SETTING_TITLES = {
     "withdraw_amounts": "💫 Суммы вывода",
     "withdraw_term": "⏳ Срок вывода",
     "task_rate": "⏱ Лимит заданий в минуту",
+    "old_ref_reward": "🕰 Награда за старого друга",
+    "old_ref_days": "📅 Дней неактивности старого друга",
 }
 
 
@@ -164,6 +166,10 @@ def setting_display(key: str) -> str:
         return str(settings.ref_tasks())
     if key == "task_rate":
         return str(settings.task_rate())
+    if key == "old_ref_reward":
+        return f"{fmt_short(settings.old_ref_reward())} ⭐"
+    if key == "old_ref_days":
+        return str(settings.old_ref_days())
     if key == "withdraw_amounts":
         return ", ".join(str(a) for a in settings.withdraw_amounts())
     return settings.withdraw_term()
