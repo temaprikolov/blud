@@ -1,0 +1,541 @@
+diff --git a/README.md b/README.md
+index a8da184..277f67d 100644
+--- a/README.md
++++ b/README.md
+@@ -71,9 +71,20 @@
+ Одна строка — одно действие: `время  id @username  ТИП  детали` (время московское). Файл лежит рядом с ботом, хранится до ~20 МБ.
+ 
+ Типы: `MSG` сообщение/команда, `CB` нажатие кнопки, `NEW` новый пользователь, `TASK_OK/TASK_NO/TASK_WAIT` задания,
+-`REF_PAY` награда за друга, `WD_REQ` заявка на вывод, `WD_DONE/WD_REJ/WD_ERR` закрытие/отклонение, `CHECK` чеки,
++`REF_PAY` награда за друга, `REF_OLD` награда за старого друга, `RESET` полный сброс, `WD_REQ` заявка на вывод, `WD_DONE/WD_REJ/WD_ERR` закрытие/отклонение, `CHECK` чеки,
+ `BONUS/DEDUCT` ручные начисления/списания, `BAN/UNBAN`, `FLOOD/FRAUD` подозрительная активность,
+ `SLOW` обработка дольше 3 с, `ERR` ошибка обработчика, `NET` проблемы связи с Telegram, `SYS` запуск/перезапуск.
+ 
+ Админу в боте: `/log` (последние 1000 строк файлом), `/log 300`, `/log @username`, `/log 123456789`, `/log wd` (по типу).
+ Или с сервера: `tail -n 3000 /bots/blud/actions.log`. Содержимое обычных текстовых сообщений (например, пароли чеков) в журнал не пишется.
++
++## Старые друзья (реферальная награда 1.5 ⭐)
++Можно позвать человека, который уже был в боте, но давно не пользовался им. Условия (проверяются в момент перехода по ссылке `?start=ref_ID`, до обновления last_active):
++не заходил в бота ни разу за последние 7 дней, за это время не делал заданий, не приводил новых рефералов и не создавал заявок на вывод; не забанен; это не сам реферер и не его уже существующий реферал.
++Награда — 1.5 ⭐ рефереру, как только друг прошёл все стены подписки. За одного человека платится один раз за всё время (таблица `old_referrals`).
++Не платим, если у реферера или друга очки фрода ≥ `FRAUD_HOLD`; больше `FRAUD_REF_BURST` старых друзей за 10 минут — отказ и очки фрода. При бане старого друга награда возвращается.
++Сумма и число дней меняются в /admin → ⚙️ Настройки («Награда за старого друга», «Дней неактивности»).
++
++## Полный сброс (/resetall)
++`/resetall` — показывает, сколько будет затронуто. `/resetall ОБНУЛИТЬ` — обнуляет всех, кроме ADMIN_IDS: баланс, заработано, задания, рефералы, историю операций, заявки на вывод, активации чеков, очки фрода.
++Остаются ники, баны, «скрыт из топа», подписки на каналы, «доверенные», дата регистрации и реферальная связь тех, кого пригласил админ. Перед сбросом рядом с bot.db создаётся копия `bot.db-backup-ГГГГММДД-ЧЧММСС`.
+diff --git a/config.py b/config.py
+index 80a0394..a402897 100644
+--- a/config.py
++++ b/config.py
+@@ -41,6 +41,9 @@ TASK_REWARD = 49
+ REF_REWARD = 1100
+ REF_TASKS_REQUIRED = 5
+ TASKS_PER_MINUTE = 2  # кулдаун: не больше N выполненных заданий в минуту
++# Старые друзья: приглашённый уже был в боте, но не заходил и ничего не делал OLD_REF_DAYS дней
++OLD_REF_REWARD = 150  # 1.5 ⭐ в сотых долях
++OLD_REF_DAYS = 7
+ 
+ # Спонсорские подписки (ОП). Пустой ключ — сеть выключена.
+ TRAFFY_API_KEY = os.getenv("TRAFFY_API_KEY", "").strip()  # pk_live_...
+diff --git a/db.py b/db.py
+index ff1556b..0d8ca3d 100644
+--- a/db.py
++++ b/db.py
+@@ -193,6 +193,18 @@ class FraudEvent(Base):
+     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+ 
+ 
++class OldReferral(Base):
++    """Награда за «старого друга»: уже был в боте, но неделю не заходил. Один человек — один раз за всё время (unique invited_id)."""
++
++    __tablename__ = "old_referrals"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True)
++    inviter_id: Mapped[int] = mapped_column(BigInteger, index=True)
++    invited_id: Mapped[int] = mapped_column(BigInteger, unique=True)
++    amount: Mapped[int] = mapped_column(Integer)  # сотые доли звезды
++    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
++
++
+ class Setting(Base):
+     """Настройки, которые админ меняет из бота (награды, суммы вывода, контакт)."""
+ 
+diff --git a/handlers_admin.py b/handlers_admin.py
+index ae5f34a..826730c 100644
+--- a/handlers_admin.py
++++ b/handlers_admin.py
+@@ -313,6 +313,50 @@ async def cmd_hidetop(message: Message) -> None:
+     await message.answer("\n".join(lines))
+ 
+ 
++RESET_WORD = "ОБНУЛИТЬ"
++
++
++@router.message(Command("resetall"))
++async def cmd_resetall(message: Message, bot: Bot) -> None:
++    """/resetall — предпросмотр; /resetall ОБНУЛИТЬ — сбросить звёзды и статистику всех, кроме админов (с копией базы)."""
++    parts = (message.text or "").split(maxsplit=1)
++    arg = parts[1].strip() if len(parts) == 2 else ""
++    if arg != RESET_WORD:
++        pv = await services.reset_preview()
++        await message.answer(
++            "⚠️ <b>Полный сброс всех, кроме админов</b>\n\n"
++            f"👥 Аккаунтов: <b>{pv['users']}</b>\n"
++            f"💰 Баланс, который сгорит: <b>{fmt_stars(pv['balance'])} ⭐</b>\n"
++            f"🎯 Заданий в статистике: <b>{pv['tasks']}</b>\n"
++            f"💫 Заявок на вывод будет удалено: <b>{pv['wd_all']}</b> (из них в ожидании: <b>{pv['wd_pending']}</b>)\n\n"
++            "Обнулится: баланс, заработано, задания, рефералы, история операций, заявки на вывод, активации чеков, очки фрода.\n"
++            "Останется: ники, баны, «скрыт из топа», подписки на каналы, «доверенные», дата регистрации.\n"
++            "Перед сбросом бот сохранит копию базы рядом с bot.db.\n\n"
++            f"Чтобы выполнить, отправь:\n<code>/resetall {RESET_WORD}</code>"
++        )
++        return
++    wait = await message.answer("⏳ Делаю копию базы и обнуляю…")
++    try:
++        rep = await services.reset_all_users()
++    except Exception as e:  # noqa: BLE001
++        log.exception("resetall failed")
++        await wait.edit_text(f"❌ Сброс не выполнен (база не изменена): <code>{esc(str(e))}</code>")
++        return
++    for admin_id, message_id in rep["notices"]:  # убираем у админов сообщения об удалённых заявках
++        try:
++            await bot.delete_message(admin_id, message_id)
++        except TelegramAPIError:
++            pass
++    pv = rep["preview"]
++    await wait.edit_text(
++        "✅ <b>Все аккаунты, кроме админских, обнулены</b>\n\n"
++        f"👥 Аккаунтов: <b>{pv['users']}</b>\n"
++        f"💰 Сгорело на балансах: <b>{fmt_stars(pv['balance'])} ⭐</b>\n"
++        f"💫 Заявок удалено: <b>{pv['wd_all']}</b>\n"
++        f"🗄 Копия базы: <code>{esc(str(rep['backup']))}</code>"
++    )
++
++
+ @router.callback_query(F.data.startswith("a:trust:"))
+ async def cb_trust(cb: CallbackQuery) -> None:
+     """«Это не фрод»: сбрасываем очки и больше не считаем подозрительным (награды и вывод размораживаются)."""
+@@ -1050,6 +1094,8 @@ HINTS = {
+     "ref_reward": "число звёзд, например <code>11</code>",
+     "ref_tasks": "целое число заданий, например <code>5</code>",
+     "task_rate": "целое число заданий в минуту, например <code>2</code>",
++    "old_ref_reward": "число звёзд, например <code>1.5</code>",
++    "old_ref_days": "целое число дней, например <code>7</code>",
+     "withdraw_amounts": "суммы через запятую, например <code>15, 25, 50, 100</code>",
+     "withdraw_term": "текст, например <code>до 48 часов</code>",
+ }
+@@ -1075,13 +1121,15 @@ async def cb_setting_edit(cb: CallbackQuery, state: FSMContext) -> None:
+ def parse_setting(key: str, text: str) -> str | None:
+     """Возвращает значение для хранения или None, если ввод некорректен."""
+     text = (text or "").strip()
+-    if key in ("task_reward", "ref_reward"):
++    if key in ("task_reward", "ref_reward", "old_ref_reward"):
+         cents = parse_stars(text)
+         return str(cents) if cents else None
+     if key == "ref_tasks":
+         return str(int(text)) if text.isdigit() and 1 <= int(text) <= 100 else None
+     if key == "task_rate":
+         return str(int(text)) if text.isdigit() and 1 <= int(text) <= 60 else None
++    if key == "old_ref_days":
++        return str(int(text)) if text.isdigit() and 1 <= int(text) <= 365 else None
+     if key == "withdraw_amounts":
+         parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
+         if not parts or len(parts) > 8 or not all(p.isdigit() and 1 <= int(p) <= 100000 for p in parts):
+diff --git a/handlers_user.py b/handlers_user.py
+index 6f3614e..30c3720 100644
+--- a/handlers_user.py
++++ b/handlers_user.py
+@@ -4,6 +4,7 @@ import asyncio
+ import logging
+ import secrets
+ import time
++from datetime import timedelta
+ 
+ from aiogram import Bot, F, Router
+ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+@@ -20,7 +21,7 @@ import moderation
+ import services
+ import settings
+ import sponsors
+-from middlewares import PENDING_CHECKS, forget_sub_cache, is_member
++from middlewares import PENDING_CHECKS, PENDING_OLD_REFS, forget_sub_cache, is_member
+ from utils import _bold, bar, esc, fmt_short, fmt_stars, mention, public_name
+ 
+ log = logging.getLogger(__name__)
+@@ -64,6 +65,32 @@ class UserS(StatesGroup):
+     check_password = State()
+ 
+ 
++# ───────────── старый друг ─────────────
++async def claim_old_ref(bot: Bot, user) -> None:
++    """Платит рефереру за «старого друга», когда тот прошёл стены подписки (см. services.old_referral_eligible)."""
++    pend = PENDING_OLD_REFS.pop(user.id, None)
++    if not pend or time.time() - pend[1] > 3600:
++        return
++    referrer_id = pend[0]
++    try:
++        res = await services.pay_old_referral(user.id, referrer_id)
++        if not res:
++            return
++        if res.get("burst"):
++            await fraud.add_event(referrer_id, "ref_burst", "пачка старых друзей", within=timedelta(minutes=10))
++            await moderation.evaluate(bot, referrer_id)
++            return
++        await bot.send_message(
++            referrer_id,
++            f"🕰 <b>Старый друг вернулся!</b>\n\n{mention(user)} снова в боте по твоей ссылке.\n"
++            f"Тебе начислено <b>{fmt_short(res['reward'])} ⭐</b>",
++        )
++    except TelegramAPIError:
++        pass
++    except Exception as e:  # noqa: BLE001 — награда за старого друга не должна ломать вход
++        log.warning("old referral pay: %s", e)
++
++
+ # ───────────── старт / меню ─────────────
+ @router.message(CommandStart())
+ async def cmd_start(message: Message, user, is_admin: bool, state: FSMContext, bot: Bot) -> None:
+@@ -76,6 +103,7 @@ async def cmd_start(message: Message, user, is_admin: bool, state: FSMContext, b
+         return
+     fresh = await services.get_user(user.id)
+     await message.answer(menu_text(fresh), reply_markup=kb.main_menu(is_admin))
++    await claim_old_ref(bot, fresh)
+ 
+ 
+ @router.callback_query(F.data.in_({"menu", "check_sub"}))
+@@ -93,6 +121,7 @@ async def cb_menu(cb: CallbackQuery, user, is_admin: bool, state: FSMContext, bo
+         code = PENDING_CHECKS.pop(user.id, None)
+         if code:  # человек открыл чек до подписки — активируем теперь
+             await process_check(bot, state, user, code, cb.message.answer)
++        await claim_old_ref(bot, fresh)
+ 
+ 
+ # ───────────── чеки ─────────────
+@@ -392,6 +421,7 @@ async def cb_task_skip(cb: CallbackQuery, user) -> None:
+ @router.callback_query(F.data == "refs")
+ async def cb_refs(cb: CallbackQuery, user) -> None:
+     total, counted = await services.referral_counts(user.id)
++    old_count = await services.old_referral_count(user.id)
+     fresh = await services.get_user(user.id)
+     link = f"https://t.me/{config.BOT_USERNAME}?start=ref_{user.id}"
+     await cb.answer()
+@@ -402,9 +432,14 @@ async def cb_refs(cb: CallbackQuery, user) -> None:
+         f"├ За приглашённого друга — <b>{fmt_short(settings.ref_reward())} ⭐</b>\n"
+         "├ Друг должен перейти по твоей ссылке\n"
+         f"└ И выполнить {settings.ref_tasks()} заданий от спонсоров\n\n"
++        f"🕰 <b>Старый друг — {fmt_short(settings.old_ref_reward())} ⭐</b>\n"
++        f"├ Друг уже был в боте, но {settings.old_ref_days()}+ дней не заходил\n"
++        "├ За это время: без заданий, новых рефералов и выводов\n"
++        "└ Награда — как только он перейдёт по твоей ссылке и пройдёт подписки\n\n"
+         f"🔗 Твоя ссылка:\n<code>{link}</code>\n\n"
+         f"👥 Всего приглашено: <b>{total}</b>\n"
+         f"✅ Засчитано: <b>{counted}</b>\n"
++        f"🕰 Старых друзей вернул: <b>{old_count}</b>\n"
+         f"🎁 Заработано на друзьях: <b>{fmt_stars(fresh.ref_earned)} ⭐</b>\n\n"
+         f"💰 Баланс: <b>{fmt_stars(fresh.balance)} ⭐️</b>\n\n"
+         "⚠️ <i>Награда начисляется только после успешной проверки выполненных заданий.</i>",
+diff --git a/keyboards.py b/keyboards.py
+index d6e7c26..f7c7d5d 100644
+--- a/keyboards.py
++++ b/keyboards.py
+@@ -152,6 +152,8 @@ SETTING_TITLES = {
+     "withdraw_amounts": "💫 Суммы вывода",
+     "withdraw_term": "⏳ Срок вывода",
+     "task_rate": "⏱ Лимит заданий в минуту",
++    "old_ref_reward": "🕰 Награда за старого друга",
++    "old_ref_days": "📅 Дней неактивности старого друга",
+ }
+ 
+ 
+@@ -164,6 +166,10 @@ def setting_display(key: str) -> str:
+         return str(settings.ref_tasks())
+     if key == "task_rate":
+         return str(settings.task_rate())
++    if key == "old_ref_reward":
++        return f"{fmt_short(settings.old_ref_reward())} ⭐"
++    if key == "old_ref_days":
++        return str(settings.old_ref_days())
+     if key == "withdraw_amounts":
+         return ", ".join(str(a) for a in settings.withdraw_amounts())
+     return settings.withdraw_term()
+diff --git a/middlewares.py b/middlewares.py
+index 399a80e..5531087 100644
+--- a/middlewares.py
++++ b/middlewares.py
+@@ -27,6 +27,8 @@ _waiting: set[int] = set()  # кто сейчас ждёт — чтобы пов
+ # Ссылка на чек, открытая до подписки на обязательные каналы: user_id -> код чека.
+ # Нужна, чтобы после «Я подписался» чек активировался сам, а не терялся.
+ PENDING_CHECKS: dict[int, str] = {}
++# «Старый друг»: user_id -> (referrer_id, время). Заполняется ДО register_user (тот обновляет last_active), оплата — когда человек прошёл все стены подписки.
++PENDING_OLD_REFS: dict[int, tuple[int, float]] = {}
+ 
+ 
+ async def is_member(bot: Bot, chat_id: int, user_id: int) -> Optional[bool]:
+@@ -110,6 +112,13 @@ class AccessMiddleware(BaseMiddleware):
+             else:
+                 PENDING_CHECKS.pop(tg_user.id, None)
+ 
++        if referrer_id:  # старый друг: проверяем неактивность до того, как заход обновит last_active
++            try:
++                if await services.old_referral_eligible(tg_user.id, referrer_id):
++                    PENDING_OLD_REFS[tg_user.id] = (referrer_id, time.time())
++            except Exception as e:  # noqa: BLE001 — не должно ломать вход
++                log.warning("old referral check: %s", e)
++
+         user, created = await services.register_user(tg_user, referrer_id)
+         data["user"] = user
+         is_admin = tg_user.id in config.ADMIN_IDS
+@@ -197,6 +206,8 @@ class AccessMiddleware(BaseMiddleware):
+                     from handlers_user import menu_text  # noqa: E402
+                     fresh = await services.get_user(tg_user.id)
+                     await msg.answer(menu_text(fresh), reply_markup=kb.main_menu(False))
++                    from handlers_user import claim_old_ref  # noqa: E402
++                    await claim_old_ref(bot, fresh)
+                     return None
+ 
+         return await handler(event, data)
+diff --git a/moderation.py b/moderation.py
+index dfbed86..526382f 100644
+--- a/moderation.py
++++ b/moderation.py
+@@ -22,6 +22,7 @@ def _forget_runtime(uid: int) -> None:
+ 
+     middlewares.forget_sub_cache(uid)
+     middlewares.PENDING_CHECKS.pop(uid, None)
++    middlewares.PENDING_OLD_REFS.pop(uid, None)
+ 
+ 
+ def report_text(report: dict) -> str:
+diff --git a/services.py b/services.py
+index d54eccb..0660a69 100644
+--- a/services.py
++++ b/services.py
+@@ -1,9 +1,11 @@
+ """Вся работа с БД. Суммы везде в сотых долях звезды."""
+ from __future__ import annotations
+ 
++import asyncio
+ import json
+ import math
+ import secrets
++import sqlite3
+ from datetime import datetime, timedelta
+ from typing import Optional
+ 
+@@ -13,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
+ import config
+ import fraud
+ import settings
+-from db import Channel, ChannelMiss, ChannelPass, Check, CheckActivation, SessionLocal, Task, Transaction, User, UserTask, Withdrawal, WithdrawalNotice, utcnow
++from db import Channel, ChannelMiss, ChannelPass, Check, CheckActivation, FraudEvent, OldReferral, SessionLocal, Task, Transaction, User, UserTask, Withdrawal, WithdrawalNotice, utcnow
+ 
+ 
+ # ───────────────────────── пользователи ─────────────────────────
+@@ -155,6 +157,20 @@ async def purge_user_data(user_id: int) -> dict:
+                     referrer.balance -= back
+                     s.add(Transaction(user_id=referrer.id, amount=-back, kind="clawback", note=f"возврат награды: друг {user_id} забанен"))
+                 report["clawback"], report["referrer_id"] = back, referrer.id
++
++        # награда за «старого друга» тоже возвращается; запись в old_referrals остаётся — повторно за него не заплатим
++        old_ref = (await s.execute(select(OldReferral).where(OldReferral.invited_id == user_id))).scalars().first()
++        if old_ref:
++            inviter = await s.get(User, old_ref.inviter_id)
++            if inviter:
++                back = min(old_ref.amount, inviter.balance)
++                inviter.earned = max(0, inviter.earned - old_ref.amount)
++                inviter.ref_earned = max(0, inviter.ref_earned - old_ref.amount)
++                if back > 0:
++                    inviter.balance -= back
++                    s.add(Transaction(user_id=inviter.id, amount=-back, kind="clawback", note=f"возврат награды: старый друг {user_id} забанен"))
++                    report["clawback"] += back
++                    report["referrer_id"] = report["referrer_id"] or inviter.id
+         await s.commit()
+     return report
+ 
+@@ -173,6 +189,139 @@ async def referral_counts(user_id: int) -> tuple[int, int]:
+         return int(row[0]), int(row[1])
+ 
+ 
++# ───────────────────────── старые друзья ─────────────────────────
++async def old_referral_eligible(user_id: int, referrer_id: int) -> bool:
++    """Можно ли засчитать user_id как «старого друга» для referrer_id.
++
++    ВАЖНО: вызывать ДО register_user — он обновляет last_active при любом заходе, и «неделю не заходил» уже не проверить.
++    Условия: человек уже есть в базе, не админ и не забанен; не приглашал его же этот реферер раньше (он и так его реферал);
++    за последние N дней (настройка, по умолчанию 7) — не заходил в бота вообще, не делал заданий, не приводил новых рефералов
++    и не создавал заявок на вывод; за него ещё ни разу не платили (один человек — одна награда за всё время).
++    """
++    if not referrer_id or referrer_id == user_id or user_id in config.ADMIN_IDS:
++        return False
++    cutoff = utcnow() - timedelta(days=settings.old_ref_days())
++    async with SessionLocal() as s:
++        user, referrer = await s.get(User, user_id), await s.get(User, referrer_id)
++        if not user or not referrer or user.is_banned or referrer.is_banned:
++            return False
++        if user.referrer_id == referrer_id or user.last_active > cutoff:
++            return False
++
++        async def has(q) -> bool:
++            return bool(await s.scalar(q))
++
++        if await has(select(func.count(OldReferral.id)).where(OldReferral.invited_id == user_id)):
++            return False
++        if await has(select(func.count(UserTask.id)).where(UserTask.user_id == user_id, UserTask.created_at > cutoff)):
++            return False
++        if await has(select(func.count(User.id)).where(User.referrer_id == user_id, User.created_at > cutoff)):
++            return False
++        if await has(select(func.count(Withdrawal.id)).where(Withdrawal.user_id == user_id, Withdrawal.created_at > cutoff)):
++            return False
++    return True
++
++
++async def pay_old_referral(user_id: int, referrer_id: int) -> Optional[dict]:
++    """Начисляет награду за старого друга. None — нельзя (бан, подозрение, уже платили).
++    {'burst': True} — слишком много старых друзей за 10 минут (ничего не начислено, нужно отметить фрод)."""
++    reward = settings.old_ref_reward()
++    async with SessionLocal() as s:
++        user, referrer = await s.get(User, user_id), await s.get(User, referrer_id)
++        if not user or not referrer or user.is_banned or referrer.is_banned:
++            return None
++        if await fraud.score(referrer_id, s) >= config.FRAUD_HOLD or await fraud.score(user_id, s) >= config.FRAUD_HOLD:
++            return None
++        recent = await s.scalar(
++            select(func.count(OldReferral.id)).where(OldReferral.inviter_id == referrer_id, OldReferral.created_at >= utcnow() - timedelta(minutes=10))
++        )
++        if int(recent or 0) >= config.FRAUD_REF_BURST:
++            return {"burst": True}
++
++        s.add(OldReferral(inviter_id=referrer_id, invited_id=user_id, amount=reward))
++        try:
++            await s.flush()
++        except IntegrityError:  # параллельный /start — уже заплатили
++            await s.rollback()
++            return None
++        await s.execute(
++            update(User)
++            .where(User.id == referrer_id)
++            .values(balance=User.balance + reward, earned=User.earned + reward, ref_earned=User.ref_earned + reward)
++        )
++        s.add(Transaction(user_id=referrer_id, amount=reward, kind="referral_old", note=f"старый друг {user_id}"))
++        await s.commit()
++    return {"reward": reward, "referrer_id": referrer_id}
++
++
++async def old_referral_count(user_id: int) -> int:
++    async with SessionLocal() as s:
++        return int(await s.scalar(select(func.count(OldReferral.id)).where(OldReferral.inviter_id == user_id)) or 0)
++
++
++# ───────────────────────── полный сброс ─────────────────────────
++def _backup_db() -> Optional[str]:
++    """Копия SQLite-базы перед сбросом (bot.db-backup-ГГГГММДД-ЧЧММСС — под .gitignore `bot.db-*`)."""
++    if not config.DB_URL.startswith("sqlite"):
++        return None
++    src = config.DB_URL.split("///", 1)[-1]
++    dst = f"{src}-backup-{utcnow():%Y%m%d-%H%M%S}"
++    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
++        a.backup(b)
++    return dst
++
++
++async def reset_preview() -> dict:
++    """Сколько всего будет затронуто сбросом (для подтверждения)."""
++    async with SessionLocal() as s:
++        non_admin = User.id.not_in(config.ADMIN_IDS)
++        return {
++            "users": int(await s.scalar(select(func.count(User.id)).where(non_admin)) or 0),
++            "balance": int(await s.scalar(select(func.coalesce(func.sum(User.balance), 0)).where(non_admin)) or 0),
++            "earned": int(await s.scalar(select(func.coalesce(func.sum(User.earned), 0)).where(non_admin)) or 0),
++            "tasks": int(await s.scalar(select(func.coalesce(func.sum(User.tasks_done), 0)).where(non_admin)) or 0),
++            "wd_pending": int(await s.scalar(select(func.count(Withdrawal.id)).where(Withdrawal.user_id.not_in(config.ADMIN_IDS), Withdrawal.status == "pending")) or 0),
++            "wd_all": int(await s.scalar(select(func.count(Withdrawal.id)).where(Withdrawal.user_id.not_in(config.ADMIN_IDS))) or 0),
++        }
++
++
++async def reset_all_users() -> dict:
++    """Обнуляет ВСЕХ, кроме админов (ADMIN_IDS): звёзды, статистику, историю — как будто только что зашли в бота. Одной транзакцией,
++    перед этим — копия базы. Остаются: сами аккаунты (ник, Premium), баны и «скрыт из топа», отметки подписок на каналы, «доверенный»,
++    дата регистрации. Реферальная связь сохраняется только у тех, кого пригласил админ (чтобы не менять статистику админов)."""
++    backup = await asyncio.to_thread(_backup_db)
++    admins = config.ADMIN_IDS
++    report: dict = {"backup": backup, "notices": []}
++    async with SessionLocal() as s:
++        report["preview"] = await reset_preview()
++        wd_ids = list((await s.execute(select(Withdrawal.id).where(Withdrawal.user_id.not_in(admins)))).scalars())
++        if wd_ids:
++            notices = list((await s.execute(select(WithdrawalNotice).where(WithdrawalNotice.withdrawal_id.in_(wd_ids)))).scalars())
++            report["notices"] = [(n.admin_id, n.message_id) for n in notices]
++            await s.execute(delete(WithdrawalNotice).where(WithdrawalNotice.withdrawal_id.in_(wd_ids)))
++            await s.execute(delete(Withdrawal).where(Withdrawal.id.in_(wd_ids)))
++        await s.execute(delete(Transaction).where(Transaction.user_id.not_in(admins)))
++        await s.execute(delete(UserTask).where(UserTask.user_id.not_in(admins)))
++        await s.execute(delete(CheckActivation).where(CheckActivation.user_id.not_in(admins)))
++        await s.execute(update(Check).values(activations=select(func.count(CheckActivation.id)).where(CheckActivation.check_id == Check.id).scalar_subquery()))
++        await s.execute(delete(OldReferral).where(OldReferral.inviter_id.not_in(admins)))
++        await s.execute(delete(FraudEvent).where(FraudEvent.user_id.not_in(admins), FraudEvent.kind.not_in(("trusted", "premium"))))
++
++        # реферальная связь: убираем у всех, кроме приглашённых админами
++        await s.execute(
++            update(User)
++            .where(User.id.not_in(admins), or_(User.referrer_id.is_(None), User.referrer_id.not_in(admins)))
++            .values(referrer_id=None, ref_counted=False, ref_top_counted=False)
++        )
++        await s.execute(
++            update(User)
++            .where(User.id.not_in(admins))
++            .values(balance=0, earned=0, ref_earned=0, tasks_done=0, tasks_skipped=0)
++        )
++        await s.commit()
++    return report
++
++
+ async def withdrawn_total(user_id: int) -> int:
+     async with SessionLocal() as s:
+         v = await s.scalar(
+@@ -1108,3 +1257,17 @@ def _(res, tg_user, referrer_id=None, *a, **kw):
+     user, created = res
+     if created:
+         audit.event(tg_user.id, "NEW", f"новый пользователь" + (f", пригласил {user.referrer_id}" if user.referrer_id else ""))
++
++
++@_audited("pay_old_referral")
++def _(res, user_id, referrer_id, *a, **kw):
++    if res and res.get("reward"):
++        audit.event(referrer_id, "REF_OLD", f"+{_stars(res['reward'])} за старого друга {user_id}")
++    elif res and res.get("burst"):
++        audit.event(referrer_id, "REF_OLD", f"отказ: пачка старых друзей, друг {user_id}")
++
++
++@_audited("reset_all_users")
++def _(res, *a, **kw):
++    p = res.get("preview", {})
++    audit.event(0, "RESET", f"сброс всех кроме админов: {p.get('users', 0)} чел., баланс {_stars(p.get('balance', 0))}, бэкап {res.get('backup')}")
+diff --git a/settings.py b/settings.py
+index 5c96a94..95f9a1b 100644
+--- a/settings.py
++++ b/settings.py
+@@ -13,6 +13,8 @@ DEFAULTS: dict[str, str] = {
+     "withdraw_amounts": ",".join(str(a) for a in config.WITHDRAW_AMOUNTS),
+     "withdraw_term": config.WITHDRAW_TERM,
+     "task_rate": str(config.TASKS_PER_MINUTE),
++    "old_ref_reward": str(config.OLD_REF_REWARD),
++    "old_ref_days": str(config.OLD_REF_DAYS),
+ }
+ 
+ _cache: dict[str, str] = dict(DEFAULTS)
+@@ -56,6 +58,14 @@ def task_rate() -> int:
+     return int(_cache["task_rate"])
+ 
+ 
++def old_ref_reward() -> int:
++    return int(_cache["old_ref_reward"])
++
++
++def old_ref_days() -> int:
++    return int(_cache["old_ref_days"])
++
++
+ def withdraw_amounts() -> tuple[int, ...]:
+     return tuple(int(x) for x in _cache["withdraw_amounts"].split(",") if x.strip())
+ 
