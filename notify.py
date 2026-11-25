@@ -1,4 +1,3 @@
-"""Уведомления по заявкам на вывод: админам — о новой заявке, и обновление этих сообщений после закрытия."""
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +35,6 @@ def request_text(w, user, closer: str | None = None, fscore: int = 0) -> str:
 
 
 async def notify_admins_new(bot: Bot, w, user) -> int:
-    """Рассылает заявку всем админам. Возвращает, скольким дошло."""
     delivered = 0
     fscore = await fraud.score(user.id)
     for admin_id in sorted(config.ADMIN_IDS):
@@ -50,15 +48,14 @@ async def notify_admins_new(bot: Bot, w, user) -> int:
 
 
 async def refresh_notices(bot: Bot, w, user, closer: str | None) -> None:
-    """После закрытия/отклонения обновляет сообщение о заявке у всех админов и убирает кнопки."""
     text = request_text(w, user, closer, await fraud.score(user.id))
     for n in await services.withdrawal_notices(w.id):
         for _attempt in range(3):
             try:
                 await bot.edit_message_text(text, chat_id=n.admin_id, message_id=n.message_id)
-            except TelegramRetryAfter as e:  # флуд-лимит при массовом отклонении — ждём и повторяем
+            except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after + 1)
                 continue
             except TelegramAPIError:
-                pass  # не изменилось / сообщение удалено — не страшно
+                pass
             break

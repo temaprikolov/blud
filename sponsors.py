@@ -1,11 +1,3 @@
-"""Спонсорские подписки (ОП) от рекламных сетей Traffy, PiarFlow и Axionna.
-
-Стена спонсоров на входе — только Traffy и PiarFlow. Axionna даёт задания ТОЛЬКО в «Заработать звёзды».
-
-Работает через их API: получаем список спонсоров для пользователя, показываем кнопками-ссылками и кнопку
-«Проверить»; пускаем дальше, когда всё выполнено. Любая ошибка сети/API = пускаем человека (бот не встаёт).
-Каждая сеть включается своим ключом в .env (пусто = выключена).
-"""
 from __future__ import annotations
 
 import asyncio
@@ -20,20 +12,20 @@ import config
 
 log = logging.getLogger(__name__)
 
-PASS_TTL = 3600  # после успешного прохождения не дёргаем сети час
+PASS_TTL = 3600
 _passed: dict[int, float] = {}
-_pending: dict[int, list["Task"]] = {}  # что показали пользователю — это же и проверяем
+_pending: dict[int, list["Task"]] = {}
 _pf_key: Optional[str] = None
 
 
 @dataclass
 class Task:
-    provider: str  # traffy / piarflow / axionna
-    key: str  # assignment_id (Traffy), ссылка (PiarFlow) или id задания (Axionna)
+    provider: str
+    key: str
     title: str
     link: str
     button: str = "Подписаться"
-    ident: str = ""  # стабильный адрес задания для учёта в БД (у Axionna ссылка может быть персональной)
+    ident: str = ""
 
     @property
     def uid(self) -> str:
@@ -53,12 +45,10 @@ def axionna_enabled() -> bool:
 
 
 def enabled() -> bool:
-    """Есть ли хоть одна сеть (для заданий)."""
     return traffy_enabled() or piarflow_enabled() or axionna_enabled()
 
 
 def wall_enabled() -> bool:
-    """Стена спонсоров на входе: Axionna в ней не участвует."""
     return traffy_enabled() or piarflow_enabled()
 
 
@@ -73,7 +63,6 @@ async def _post(url: str, key_header: dict, body: dict, method: str = "POST") ->
             return r.status, data
 
 
-# ───────────── Traffy ─────────────
 def _traffy_base() -> str:
     return config.TRAFFY_URL.split("/publisher")[0].rstrip("/") + "/publisher"
 
@@ -104,18 +93,16 @@ async def traffy_pending(u, tasks: list[Task], strict: bool = False) -> list[Tas
                            {"telegram_id": u.id, "assignment_ids": [t.key for t in tasks]})
     if st >= 400 or not isinstance(data, dict):
         raise RuntimeError(f"Traffy /tasks/check HTTP {st}: {str(data)[:200]}")
-    ok = ("completed",) if strict else ("completed", "rejected")  # strict (награда): только честно выполненное
+    ok = ("completed",) if strict else ("completed", "rejected")
     done = {r.get("assignment_id") for r in data.get("results") or []
             if r.get("status") in ok or (not strict and r.get("reason") == "already_completed")}
     return [t for t in tasks if t.key not in done]
 
 
-# ───────────── PiarFlow ─────────────
 _PF = "https://piarflow.com/v1"
 
 
 async def _pf_bot_key(bot_token: str) -> Optional[str]:
-    """Ключ бота: из .env, иначе получаем по токену аккаунта (находим бота или регистрируем)."""
     global _pf_key
     if config.PIARFLOW_BOT_KEY:
         return config.PIARFLOW_BOT_KEY
@@ -126,7 +113,7 @@ async def _pf_bot_key(bot_token: str) -> Optional[str]:
     st, data = await _post(f"{_PF}/factory/bots/{bot_id}", h, {}, method="GET")
     if st == 404:
         st, data = await _post(f"{_PF}/factory/bots", h, {"bot_token": bot_token})
-    if st == 401:  # это не токен аккаунта — скорее всего, друг дал сразу ключ бота
+    if st == 401:
         log.info("PiarFlow: токен не подошёл как токен аккаунта, пробую как ключ бота")
         _pf_key = config.PIARFLOW_API_TOKEN
         return _pf_key
@@ -141,7 +128,7 @@ async def pf_fetch(u, limit: int = 5) -> list[Task]:
     key = await _pf_bot_key(config.BOT_TOKEN)
     h = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     st, data = await _post(f"{_PF}/sponsors", h, {"user_id": u.id, "chat_id": u.id, "max_sponsors": limit})
-    if st in (403, 404):  # пользователь не может выполнить / заданий нет
+    if st in (403, 404):
         return []
     if st >= 400 or not isinstance(data, dict):
         raise RuntimeError(f"PiarFlow /sponsors HTTP {st}: {str(data)[:200]}")
@@ -167,18 +154,16 @@ async def pf_pending(u, tasks: list[Task], strict: bool = False) -> list[Task]:
     if st >= 400 or not isinstance(data, dict):
         raise RuntimeError(f"PiarFlow /sponsors/check HTTP {st}: {str(data)[:200]}")
     got = {s.get("link"): s.get("status") for s in data.get("sponsors") or []}
-    if strict:  # награда человеку — только за засчитанную подписку
+    if strict:
         return [t for t in tasks if got.get(t.key) != "subscribed"]
     return [t for t in tasks if got.get(t.key) == "unsubscribed"]
 
 
-# ───────────── Axionna ─────────────
 def _ax_headers() -> dict:
     return {"Authorization": f"Bearer {config.AXIONNA_API_KEY}", "Content-Type": "application/json"}
 
 
 def _ax_title(sp: dict) -> tuple[str, str]:
-    """(название, текст кнопки) для задания Axionna."""
     link = str(sp.get("target_url") or sp.get("link") or "")
     kind = str(sp.get("target_kind") or "").lower()
     name = link.split("?")[0].rstrip("/").split("/")[-1]
@@ -203,7 +188,7 @@ async def ax_fetch(u, limit: int = 5) -> list[Task]:
     if getattr(u, "language_code", None):
         body["language_code"] = u.language_code
     st, data = await _post(config.AXIONNA_URL.rstrip("/") + "/sponsors", _ax_headers(), body)
-    if st in (403, 404):  # пользователь не подходит / заданий нет
+    if st in (403, 404):
         return []
     if st >= 400 or not isinstance(data, dict):
         raise RuntimeError(f"Axionna /sponsors HTTP {st}: {str(data)[:200]}")
@@ -235,19 +220,16 @@ async def _ax_check(u, tasks: list[Task]) -> dict[str, str]:
 
 async def ax_pending(u, tasks: list[Task], strict: bool = False) -> list[Task]:
     got = await _ax_check(u, tasks)
-    if strict:  # награда человеку — только за status == ok (not_allowed награды не даёт никогда)
+    if strict:
         return [t for t in tasks if got.get(t.key) != "ok"]
-    # стена спонсоров: not_allowed — сеть сняла задание, человека им не держим
     return [t for t in tasks if got.get(t.key) == "not_ok"]
 
 
-# ───────────── общий слой ─────────────
 _fetch_cache: dict[int, tuple[float, list[Task]]] = {}
-FETCH_TTL = 25  # заявки сетей на одного человека не дёргаем чаще раза в 25 сек — иначе бот тормозит
+FETCH_TTL = 25
 
 
 async def fetch(u, limit: int = 5, wall: bool = False) -> list[Task]:
-    """Задания от сетей. wall=True — для стены спонсоров на входе (без Axionna); иначе — для «Заработать звёзды»."""
     if not wall:
         hit = _fetch_cache.get(u.id)
         if hit and hit[0] > time.time():
@@ -259,22 +241,21 @@ async def fetch(u, limit: int = 5, wall: bool = False) -> list[Task]:
     async def run(fn):
         try:
             return await asyncio.wait_for(fn(u, limit), timeout=6)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("Спонсоры: %s", e)
             return []
 
-    results = await asyncio.gather(*(run(fn) for on, fn in jobs if on))  # сети опрашиваем параллельно
+    results = await asyncio.gather(*(run(fn) for on, fn in jobs if on))
     tasks: list[Task] = [t for r in results for t in r]
     if not wall:
         _fetch_cache[u.id] = (time.time() + FETCH_TTL, list(tasks))
     return tasks
 
 
-WALL_MAX = 4  # сколько спонсоров показываем на входе — не заваливаем человека кнопками
+WALL_MAX = 4
 
 
 def _wall_pick(tasks: list[Task]) -> list[Task]:
-    """На входе: не больше WALL_MAX, и один бот не повторяется (у сетей это разные ссылки на одного и того же бота)."""
     seen, out = set(), []
     for t in tasks:
         k = (t.provider, t.title) if t.title.startswith("Бот") else (t.provider, t.link)
@@ -282,7 +263,6 @@ def _wall_pick(tasks: list[Task]) -> list[Task]:
             continue
         seen.add(k)
         out.append(t)
-    # чередуем сети, чтобы не было четырёх подряд от одной
     by = {}
     for t in out:
         by.setdefault(t.provider, []).append(t)
@@ -295,7 +275,6 @@ def _wall_pick(tasks: list[Task]) -> list[Task]:
 
 
 async def gate(u, force: bool = False) -> list[Task]:
-    """Пустой список — пускаем. Иначе — спонсоры, на которых человеку надо подписаться."""
     if not wall_enabled():
         return []
     if not force and _passed.get(u.id, 0) > time.time():
@@ -312,7 +291,7 @@ async def gate(u, force: bool = False) -> list[Task]:
             except Exception as e:
                 log.warning("Спонсоры: проверка не удалась: %s", e)
         if left:
-            fresh = await fetch(u, wall=True)  # обновлённый список (истёкшие заменятся)
+            fresh = await fetch(u, wall=True)
             tasks = _wall_pick(fresh) or left
             _pending[u.id] = tasks
             return tasks
@@ -327,10 +306,8 @@ async def gate(u, force: bool = False) -> list[Task]:
 
 
 async def task_state(u, task: Task) -> str:
-    """Задание из «Заработать звёзды»: 'done' — выполнено, 'pending' — ещё нет, 'gone' — сеть сняла задание."""
     try:
         if task.provider == "axionna":
-            # подписка у сети засчитывается с задержкой — даём пару повторных попыток, а не отказываем сразу
             for i in range(3):
                 got = (await _ax_check(u, [task])).get(task.key)
                 log.info("Axionna check user=%s task=%s -> %s", u.id, task.key, got)
@@ -343,7 +320,7 @@ async def task_state(u, task: Task) -> str:
             return "pending"
         fn = traffy_pending if task.provider == "traffy" else pf_pending
         return "pending" if await fn(u, [task], strict=True) else "done"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("Спонсоры: проверка задания не удалась: %s", e)
         return "error"
 

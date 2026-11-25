@@ -1,8 +1,3 @@
-"""Анти-спам: лимит частоты действий на пользователя (скользящее окно) + мут с нарастающим сроком.
-
-Лишние нажатия молча отбрасываются (до БД и до проверки подписок они не доходят), за повторный флуд
-человек получает мут и очки подозрительности в fraud; набрал достаточно — moderation.evaluate его банит.
-"""
 from __future__ import annotations
 
 import time
@@ -27,7 +22,7 @@ class _S:
         self.drops = 0
         self.strikes = 0
         self.last_seen = 0.0
-        self.told = 0.0  # когда последний раз отвечали «не так быстро»
+        self.told = 0.0
 
 
 class RateLimitMiddleware(BaseMiddleware):
@@ -56,7 +51,7 @@ class RateLimitMiddleware(BaseMiddleware):
         now = time.time()
         self._gc(now)
         st = self._st.setdefault(tg_user.id, _S())
-        if now - st.last_seen > 3600:  # час тишины — страйки обнуляются
+        if now - st.last_seen > 3600:
             st.strikes = 0
         st.last_seen = now
 
@@ -71,7 +66,6 @@ class RateLimitMiddleware(BaseMiddleware):
         if recent <= config.RATE_BURST and len(st.hits) <= config.RATE_PER_MIN:
             return await handler(event, data)
 
-        # превышение: событие отбрасываем
         st.drops += 1
         if st.drops >= config.RATE_DROPS_PER_STRIKE:
             st.drops = 0
@@ -89,7 +83,6 @@ class RateLimitMiddleware(BaseMiddleware):
 
     @staticmethod
     async def _notify(event: Message | CallbackQuery, st: _S, now: float, text: str, force: bool = False) -> None:
-        """Отвечаем редко (раз в 5 секунд), иначе сами станем спамить."""
         if not force and now - st.told < 5:
             if isinstance(event, CallbackQuery):
                 try:

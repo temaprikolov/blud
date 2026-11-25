@@ -18,21 +18,17 @@ import sponsors
 
 log = logging.getLogger(__name__)
 
-_ok_cache: dict[int, float] = {}  # user_id -> до какого момента подписка считается проверенной
+_ok_cache: dict[int, float] = {}
 CACHE_TTL = 120
-NO_CHECK_WAIT = 10  # секунд ожидания для каналов без проверки подписки
-_banned_told: dict[int, float] = {}  # забаненному отвечаем не чаще раза в минуту
-_waiting: set[int] = set()  # кто сейчас ждёт — чтобы повторные нажатия не запускали ожидание заново
+NO_CHECK_WAIT = 10
+_banned_told: dict[int, float] = {}
+_waiting: set[int] = set()
 
-# Ссылка на чек, открытая до подписки на обязательные каналы: user_id -> код чека.
-# Нужна, чтобы после «Я подписался» чек активировался сам, а не терялся.
 PENDING_CHECKS: dict[int, str] = {}
-# «Старый друг»: user_id -> (referrer_id, время). Заполняется ДО register_user (тот обновляет last_active), оплата — когда человек прошёл все стены подписки.
 PENDING_OLD_REFS: dict[int, tuple[int, float]] = {}
 
 
 async def is_member(bot: Bot, chat_id: int, user_id: int) -> Optional[bool]:
-    """True/False, либо None, если проверить нельзя (бот не админ канала и т.п.)."""
     try:
         m = await bot.get_chat_member(chat_id, user_id)
     except TelegramAPIError as e:
@@ -54,7 +50,7 @@ async def unsubscribed_channels(bot: Bot, user_id: int, use_cache: bool = True):
     ok_ids: list[int] = []
     channels = await services.list_channels()
     checked = [ch for ch in channels if ch.check_enabled]
-    results = await asyncio.gather(*(is_member(bot, ch.chat_id, user_id) for ch in checked))  # параллельно, а не по очереди
+    results = await asyncio.gather(*(is_member(bot, ch.chat_id, user_id) for ch in checked))
     res_by_id = {ch.id: r for ch, r in zip(checked, results)}
     for ch in channels:
         if ch.check_enabled:
@@ -64,17 +60,17 @@ async def unsubscribed_channels(bot: Bot, user_id: int, use_cache: bool = True):
                 miss_ids.append(ch.id)
             elif r:
                 ok_ids.append(ch.id)
-        else:  # без проверки: считаем подписанным тех, кто уже прошёл ожидание
+        else:
             if confirmed is None:
                 confirmed = await services.confirmed_channel_ids(user_id)
             if ch.id not in confirmed:
                 missing.append(ch)
-    try:  # статистика «сколько подписалось с бота»: не должна ломать вход
+    try:
         if miss_ids:
             await services.mark_missing(user_id, miss_ids)
         if ok_ids:
             await services.convert_passes(user_id, ok_ids)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("Статистика каналов: %s", e)
     if not missing:
         _ok_cache[user_id] = time.time() + CACHE_TTL
@@ -88,7 +84,6 @@ def forget_sub_cache(user_id: int) -> None:
 
 
 class AccessMiddleware(BaseMiddleware):
-    """Регистрирует пользователя, режет забаненных, требует подписку на каналы."""
 
     async def __call__(
         self,
@@ -112,11 +107,11 @@ class AccessMiddleware(BaseMiddleware):
             else:
                 PENDING_CHECKS.pop(tg_user.id, None)
 
-        if referrer_id:  # старый друг: проверяем неактивность до того, как заход обновит last_active
+        if referrer_id:
             try:
                 if await services.old_referral_eligible(tg_user.id, referrer_id):
                     PENDING_OLD_REFS[tg_user.id] = (referrer_id, time.time())
-            except Exception as e:  # noqa: BLE001 — не должно ломать вход
+            except Exception as e:
                 log.warning("old referral check: %s", e)
 
         user, created = await services.register_user(tg_user, referrer_id)
@@ -127,13 +122,13 @@ class AccessMiddleware(BaseMiddleware):
         if is_admin:
             return await handler(event, data)
 
-        if created:  # анти-фрод: оцениваем новый аккаунт и пачки рефералов
+        if created:
             try:
                 await fraud.on_register(tg_user, user.referrer_id)
                 await moderation.evaluate(data["bot"], tg_user.id)
                 if user.referrer_id:
                     await moderation.evaluate(data["bot"], user.referrer_id)
-            except Exception as e:  # noqa: BLE001 — анти-фрод не должен ломать вход
+            except Exception as e:
                 log.warning("anti-fraud on_register: %s", e)
             user = await services.get_user(tg_user.id) or user
             data["user"] = user
@@ -151,7 +146,6 @@ class AccessMiddleware(BaseMiddleware):
         force = isinstance(event, CallbackQuery) and event.data == "check_sub"
         missing = await unsubscribed_channels(bot, tg_user.id, use_cache=not force)
         if missing and force and isinstance(event, CallbackQuery) and not any(c.check_enabled for c in missing):
-            # остались только каналы без проверки: ждём NO_CHECK_WAIT секунд и считаем подписку подтверждённой
             if tg_user.id in _waiting:
                 await event.answer("⏳ Подожди, подписка проверяется…")
                 return None
@@ -181,7 +175,6 @@ class AccessMiddleware(BaseMiddleware):
                 await event.answer(text, reply_markup=kb.sub_wall(missing))
             return None
 
-        # спонсорские подписки (Traffy / PiarFlow; Axionna — только в заданиях): на /start и по кнопке «Проверить»
         if sponsors.wall_enabled():
             is_start = isinstance(event, Message) and bool(event.text) and event.text.startswith("/start")
             is_cb = isinstance(event, CallbackQuery) and event.data == "sp_check"
@@ -192,7 +185,7 @@ class AccessMiddleware(BaseMiddleware):
                     text = "📢 <b>Подпишись на спонсоров</b> ниже, затем нажми «Проверить подписку» — и доступ откроется."
                     if forced:
                         await event.answer("Ты ещё не подписался на всех спонсоров", show_alert=True)
-                        try:  # обновляем список на месте (часть спонсоров могла уже выполниться)
+                        try:
                             await msg.edit_text(text, reply_markup=kb.sponsors_wall(tasks), disable_web_page_preview=True)
                         except TelegramAPIError:
                             pass
@@ -203,10 +196,10 @@ class AccessMiddleware(BaseMiddleware):
                     return None
                 if isinstance(event, CallbackQuery) and event.data == "sp_check":
                     await event.answer("✅ Готово")
-                    from handlers_user import menu_text  # noqa: E402
+                    from handlers_user import menu_text
                     fresh = await services.get_user(tg_user.id)
                     await msg.answer(menu_text(fresh), reply_markup=kb.main_menu(False))
-                    from handlers_user import claim_old_ref  # noqa: E402
+                    from handlers_user import claim_old_ref
                     await claim_old_ref(bot, fresh)
                     return None
 

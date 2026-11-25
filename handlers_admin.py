@@ -86,17 +86,14 @@ async def admin_home_text() -> str:
     )
 
 
-# ───────────── вход ─────────────
 @router.message(CommandStart(), StateFilter("*"))
 async def admin_start_resets_state(message: Message, state: FSMContext) -> None:
-    """/start сбрасывает незаконченный диалог и отдаёт обработку обычному меню."""
     await state.clear()
     raise SkipHandler()
 
 
 @router.message(Command("traffy"))
 async def cmd_sponsors(message: Message) -> None:
-    """Диагностика спонсорских сетей: что вернёт каждая для самого админа."""
     if not sponsors.enabled():
         await message.answer("Спонсорские сети выключены: ключи в .env пустые.")
         return
@@ -130,7 +127,6 @@ async def cb_admin_menu(cb: CallbackQuery, state: FSMContext) -> None:
     await show(cb, await admin_home_text(), await admin_menu_kb())
 
 
-# ───────────── счётчики ─────────────
 @router.callback_query(F.data == "a:counters")
 async def cb_counters(cb: CallbackQuery) -> None:
     c = await services.admin_counters()
@@ -164,7 +160,6 @@ async def cb_counters(cb: CallbackQuery) -> None:
     )
 
 
-# ───────────── поиск пользователя ─────────────
 @router.callback_query(F.data == "a:find")
 async def cb_find(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(S.find)
@@ -257,7 +252,6 @@ async def cb_ban(cb: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("a:hidetop:"))
 async def cb_hide_top(cb: CallbackQuery) -> None:
-    """Вручную убрать человека из всех топов (или вернуть)."""
     uid = int(cb.data.split(":")[2])
     u = await services.get_user(uid)
     if not u:
@@ -275,7 +269,6 @@ def _ids_from(text: str) -> list[int]:
 
 @router.message(Command("banids"))
 async def cmd_banids(message: Message, bot: Bot) -> None:
-    """/banids 123 456 … — массовый бан (с авто-чисткой заявок и данных)."""
     ids = _ids_from(message.text.split(maxsplit=1)[1] if " " in (message.text or "") else "")
     if not ids:
         await message.answer("Использование: <code>/banids 123456789 987654321 …</code>")
@@ -297,7 +290,6 @@ async def cmd_banids(message: Message, bot: Bot) -> None:
 
 @router.message(Command("hidetop"))
 async def cmd_hidetop(message: Message) -> None:
-    """/hidetop 123 456 … — убрать из топов (повторно — вернуть)."""
     ids = _ids_from(message.text.split(maxsplit=1)[1] if " " in (message.text or "") else "")
     if not ids:
         await message.answer("Использование: <code>/hidetop 123456789</code> (повтор — вернуть в топ)")
@@ -318,7 +310,6 @@ RESET_WORD = "ОБНУЛИТЬ"
 
 @router.message(Command("resetall"))
 async def cmd_resetall(message: Message, bot: Bot) -> None:
-    """/resetall — предпросмотр; /resetall ОБНУЛИТЬ — сбросить звёзды и статистику всех, кроме админов (с копией базы)."""
     parts = (message.text or "").split(maxsplit=1)
     arg = parts[1].strip() if len(parts) == 2 else ""
     if arg != RESET_WORD:
@@ -338,11 +329,11 @@ async def cmd_resetall(message: Message, bot: Bot) -> None:
     wait = await message.answer("⏳ Делаю копию базы и обнуляю…")
     try:
         rep = await services.reset_all_users()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("resetall failed")
         await wait.edit_text(f"❌ Сброс не выполнен (база не изменена): <code>{esc(str(e))}</code>")
         return
-    for admin_id, message_id in rep["notices"]:  # убираем у админов сообщения об удалённых заявках
+    for admin_id, message_id in rep["notices"]:
         try:
             await bot.delete_message(admin_id, message_id)
         except TelegramAPIError:
@@ -359,7 +350,6 @@ async def cmd_resetall(message: Message, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("a:trust:"))
 async def cb_trust(cb: CallbackQuery) -> None:
-    """«Это не фрод»: сбрасываем очки и больше не считаем подозрительным (награды и вывод размораживаются)."""
     uid = int(cb.data.split(":")[2])
     await fraud.trust(uid)
     await cb.answer("✅ Отмечен как доверенный, заморозка снята", show_alert=True)
@@ -371,7 +361,6 @@ async def cb_trust(cb: CallbackQuery) -> None:
 
 @router.message(Command("fraud"))
 async def cmd_fraud(message: Message) -> None:
-    """Список самых подозрительных пользователей."""
     rows = await fraud.top_suspicious(15)
     if not rows:
         await message.answer("🛡 Подозрительных пользователей нет.")
@@ -390,7 +379,6 @@ async def cmd_fraud(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("a:wdban:"))
 async def cb_wd_ban(cb: CallbackQuery, bot: Bot) -> None:
-    """Бан/разбан прямо из заявки на вывод (без захода в профиль). Сообщение остаётся на месте."""
     uid = int(cb.data.split(":")[2])
     u = await services.get_user(uid)
     if not u:
@@ -406,7 +394,6 @@ async def cb_wd_ban(cb: CallbackQuery, bot: Bot) -> None:
     else:
         await moderation.unban_user(uid)
         await cb.answer("✅ Пользователь разбанен")
-    # обновляем только кнопку бана в этом сообщении, остальные кнопки не трогаем
     markup = cb.message.reply_markup
     if markup:
         rows = []
@@ -423,7 +410,6 @@ async def cb_wd_ban(cb: CallbackQuery, bot: Bot) -> None:
             pass
 
 
-# ───────────── списание звёзд ─────────────
 @router.callback_query(F.data.startswith("a:deduct:"))
 async def cb_deduct(cb: CallbackQuery, state: FSMContext) -> None:
     uid = int(cb.data.split(":")[2])
@@ -465,9 +451,7 @@ async def msg_deduct(message: Message, state: FSMContext, bot: Bot) -> None:
     await message.answer(text, reply_markup=markup)
 
 
-# ───────────── вспомогательное: канал/чат по вводу админа ─────────────
 async def resolve_chat(bot: Bot, raw: str):
-    """-> (chat, error). Проверяет, что бот — администратор (иначе проверка подписки не работает)."""
     raw = (raw or "").strip()
     m = re.match(r"^(?:https?://)?t\.me/([A-Za-z0-9_]{4,})/?$", raw)
     if m:
@@ -491,7 +475,6 @@ async def resolve_chat(bot: Bot, raw: str):
     return chat, None
 
 
-# ───────────── задания ─────────────
 @router.callback_query(F.data == "a:tasks")
 async def cb_tasks(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -649,7 +632,6 @@ async def msg_task_price(message: Message, state: FSMContext) -> None:
     await _finish_task(message, state, cents)
 
 
-# ───────────── каналы обязательной подписки ─────────────
 @router.callback_query(F.data == "a:channels")
 async def cb_channels(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -819,7 +801,6 @@ async def cb_channel_mode_wait(cb: CallbackQuery, state: FSMContext) -> None:
 
 
 def normalize_channel_link(text: str) -> tuple[str | None, str | None]:
-    """-> (url, публичный @username или None). url=None — формат не подошёл."""
     text = (text or "").strip()
     m = re.fullmatch(r"@([A-Za-z0-9_]{4,32})", text) or re.fullmatch(
         r"(?:https?://)?t\.me/([A-Za-z0-9_]{4,32})/?", text
@@ -850,7 +831,7 @@ async def msg_channel_link(message: Message, state: FSMContext, bot: Bot) -> Non
             reply_markup=kb.cancel_kb(),
         )
         return
-    if username:  # публичный канал: название и ID бот может узнать и без прав админа
+    if username:
         try:
             chat = await bot.get_chat("@" + username)
         except TelegramAPIError:
@@ -907,7 +888,6 @@ async def msg_channel_url(message: Message, state: FSMContext) -> None:
     )
 
 
-# ───────────── рассылка ─────────────
 @router.callback_query(F.data == "a:broadcast")
 async def cb_broadcast(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -971,7 +951,7 @@ async def cb_broadcast_go(cb: CallbackQuery, state: FSMContext, bot: Bot) -> Non
     task = asyncio.create_task(
         _run_broadcast(bot, cb.from_user.id, data["chat_id"], data["message_id"], data.get("category", "all"))
     )
-    _bg_tasks.add(task)  # иначе сборщик мусора может убить задачу
+    _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
 
 
@@ -998,7 +978,7 @@ async def _run_broadcast(bot: Bot, admin_id: int, from_chat: int, message_id: in
                     failed += 1
                     log.warning("broadcast to %s failed: %s", uid, e)
                 break
-            await asyncio.sleep(0.05)  # ~20 сообщений в секунду
+            await asyncio.sleep(0.05)
     finally:
         _broadcast_running = False
     try:
@@ -1010,7 +990,6 @@ async def _run_broadcast(bot: Bot, admin_id: int, from_chat: int, message_id: in
         pass
 
 
-# ───────────── начисление звёзд ─────────────
 @router.callback_query(F.data.startswith("a:bonus:"))
 async def cb_bonus(cb: CallbackQuery, state: FSMContext) -> None:
     uid = int(cb.data.split(":")[2])
@@ -1047,7 +1026,6 @@ async def msg_bonus(message: Message, state: FSMContext, bot: Bot) -> None:
     await message.answer(text, reply_markup=markup)
 
 
-# ───────────── личное сообщение пользователю ─────────────
 @router.callback_query(F.data.startswith("a:dm:"))
 async def cb_dm(cb: CallbackQuery, state: FSMContext) -> None:
     uid = int(cb.data.split(":")[2])
@@ -1076,7 +1054,6 @@ async def msg_dm(message: Message, state: FSMContext, bot: Bot) -> None:
     await message.answer(text, reply_markup=markup)
 
 
-# ───────────── настройки ─────────────
 @router.callback_query(F.data == "a:settings")
 async def cb_settings(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -1119,7 +1096,6 @@ async def cb_setting_edit(cb: CallbackQuery, state: FSMContext) -> None:
 
 
 def parse_setting(key: str, text: str) -> str | None:
-    """Возвращает значение для хранения или None, если ввод некорректен."""
     text = (text or "").strip()
     if key in ("task_reward", "ref_reward", "old_ref_reward"):
         cents = parse_stars(text)
@@ -1135,7 +1111,7 @@ def parse_setting(key: str, text: str) -> str | None:
         if not parts or len(parts) > 8 or not all(p.isdigit() and 1 <= int(p) <= 100000 for p in parts):
             return None
         return ",".join(str(x) for x in sorted({int(p) for p in parts}))
-    return text if 1 <= len(text) <= 100 else None  # withdraw_term
+    return text if 1 <= len(text) <= 100 else None
 
 
 @router.message(S.setting)
@@ -1160,7 +1136,6 @@ async def cb_setting_reset(cb: CallbackQuery, state: FSMContext) -> None:
     await cb_settings(cb, state)
 
 
-# ───────────── топы ─────────────
 TOP_TITLES = {"balance": "💰 Топ по балансу", "earned": "🏆 Топ по заработку", "refs": "👥 Топ по рефералам (засчитанные)"}
 
 
@@ -1181,7 +1156,6 @@ async def cb_admin_top(cb: CallbackQuery) -> None:
     await show(cb, text, kb.admin_tops(field))
 
 
-# ───────────── экспорт ─────────────
 @router.callback_query(F.data == "a:export")
 async def cb_export(cb: CallbackQuery) -> None:
     await cb.answer("Готовлю файл…")
@@ -1193,14 +1167,13 @@ async def cb_export(cb: CallbackQuery) -> None:
         writer.writerows(rows)
     else:
         buf.write("id\n")
-    data = buf.getvalue().encode("utf-8-sig")  # BOM, чтобы Excel открыл кириллицу
+    data = buf.getvalue().encode("utf-8-sig")
     await cb.message.answer_document(
         BufferedInputFile(data, filename="users.csv"),
         caption=f"📤 Пользователей в выгрузке: {len(rows)}",
     )
 
 
-# ───────────── заявки на вывод ─────────────
 def wd_detail_text(w, user, closer: str | None = None) -> str:
     return notify.request_text(w, user, closer)
 
@@ -1310,7 +1283,6 @@ async def cb_wd_reject(cb: CallbackQuery, bot: Bot) -> None:
         pass
 
 
-# ── массовое отклонение всех заявок в ожидании ──
 @router.callback_query(F.data == "a:wd_all")
 async def cb_wd_all(cb: CallbackQuery) -> None:
     total = await services.pending_withdrawal_count()
@@ -1330,7 +1302,6 @@ async def cb_wd_all(cb: CallbackQuery) -> None:
 
 
 async def _tg_call(call) -> bool:
-    """Вызов Telegram API с ожиданием при флуд-лимите. True — удалось, прочие ошибки глотаем."""
     for _attempt in range(3):
         try:
             await call()
@@ -1344,16 +1315,14 @@ async def _tg_call(call) -> bool:
 
 async def _run_wd_reject_all(bot: Bot, admin_id: int, rejected: list, notify_users: bool) -> None:
     closer = await _closer_name(admin_id)
-    # 1) у всех админов обновляем сообщения о заявках и убираем кнопки
     for w, user in rejected:
         try:
             await notify.refresh_notices(bot, w, user, closer)
-        except Exception:  # noqa: BLE001 — сбой одной заявки не должен останавливать остальные
+        except Exception:
             log.exception("не удалось обновить сообщения по заявке %s", w.id)
         await asyncio.sleep(0.1)
     if not notify_users:
         return
-    # 2) уведомляем пользователей (одно сообщение на человека, даже если у него несколько заявок)
     by_user: dict[int, list] = {}
     for w, _user in rejected:
         by_user.setdefault(w.user_id, []).append(w)
@@ -1369,7 +1338,7 @@ async def _run_wd_reject_all(bot: Bot, admin_id: int, rejected: list, notify_use
             delivered += 1
         else:
             failed += 1
-        await asyncio.sleep(0.05)  # ~20 сообщений в секунду
+        await asyncio.sleep(0.05)
     await _tg_call(
         lambda: bot.send_message(
             admin_id,
@@ -1382,7 +1351,7 @@ async def _run_wd_reject_all(bot: Bot, admin_id: int, rejected: list, notify_use
 async def cb_wd_all_do(cb: CallbackQuery, bot: Bot) -> None:
     notify_users = cb.data.endswith(":notify")
     rejected = await services.reject_all_withdrawals(cb.from_user.id)
-    if not rejected:  # уже обработал другой админ / нажали повторно
+    if not rejected:
         await cb.answer("Заявок в ожидании нет", show_alert=True)
         await _show_wd_list(cb)
         return
@@ -1398,7 +1367,7 @@ async def cb_wd_all_do(cb: CallbackQuery, bot: Bot) -> None:
         kb.back("a:wd_list", "⬅️ К заявкам"),
     )
     task = asyncio.create_task(_run_wd_reject_all(bot, cb.from_user.id, rejected, notify_users))
-    _bg_tasks.add(task)  # иначе сборщик мусора может убить задачу
+    _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
 
 

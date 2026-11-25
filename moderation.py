@@ -1,4 +1,3 @@
-"""Баны и реакция на подозрения: бан с автоматической чисткой данных, уведомления админам, оценка очков фрода."""
 from __future__ import annotations
 
 import logging
@@ -17,8 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def _forget_runtime(uid: int) -> None:
-    """Сбрасывает оперативную память по пользователю (кэш подписки, ожидающий чек)."""
-    import middlewares  # локально: middlewares тянет много зависимостей
+    import middlewares
 
     middlewares.forget_sub_cache(uid)
     middlewares.PENDING_CHECKS.pop(uid, None)
@@ -47,15 +45,13 @@ async def _alert_admins(bot: Bot, text: str, markup: InlineKeyboardMarkup | None
 
 
 async def ban_user(bot: Bot, uid: int, reason: str, by: int | None = None) -> dict:
-    """Единая точка бана: помечает забаненным, чистит заявки/баланс/чеки/рефералку,
-    удаляет у админов сообщения об удалённых заявках и сообщает, что именно было сделано."""
     report = await services.set_banned(uid, True) or {}
     report.setdefault("notices", [])
     for admin_id, message_id in report["notices"]:
         try:
             await bot.delete_message(admin_id, message_id)
         except TelegramAPIError:
-            pass  # сообщение уже удалено / старше 48 часов — не страшно
+            pass
     _forget_runtime(uid)
 
     user = await services.get_user(uid)
@@ -75,7 +71,6 @@ async def unban_user(uid: int) -> None:
 
 
 async def evaluate(bot: Bot, uid: int) -> None:
-    """Смотрит на очки пользователя: достаточно много — банит, средне — замораживает и зовёт админа."""
     if fraud.is_exempt(uid):
         return
     user = await services.get_user(uid)

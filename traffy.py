@@ -1,10 +1,3 @@
-"""Интеграция с Traffy (ОП-блок): перед доступом к боту проверяем спонсорские подписки.
-
-POST https://api.traffy.ai/publisher, заголовок x-publisher-api-key, в теле tg_id пользователя.
-Если юзер подписан — пускаем. Если нет — Traffy возвращает рекламный пост и ссылки на спонсоров:
-показываем их с кнопкой «Проверить подписку». Любая ошибка сети/ответа = пускаем юзера (бот не должен
-вставать из-за рекламной сети), причина пишется в лог.
-"""
 from __future__ import annotations
 
 import logging
@@ -19,7 +12,7 @@ import config
 
 log = logging.getLogger(__name__)
 
-PASS_TTL = 3600  # после успешной проверки не дёргаем Traffy час
+PASS_TTL = 3600
 _passed: dict[int, float] = {}
 
 _POS = {"ok", "success", "subscribed", "passed", "allowed", "approved", "done", "true"}
@@ -32,7 +25,7 @@ _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+")
 class Result:
     passed: bool
     text: str = ""
-    links: list[tuple[str, str]] = field(default_factory=list)  # (название, ссылка)
+    links: list[tuple[str, str]] = field(default_factory=list)
     raw: Any = None
     error: Optional[str] = None
 
@@ -75,7 +68,7 @@ def parse(data: Any) -> Result:
     flags: list[bool] = []
     _walk(data, links, texts, flags)
     text = texts[0] if texts else ""
-    for u in _URL_RE.findall(text):  # ссылки, вшитые прямо в текст поста
+    for u in _URL_RE.findall(text):
         if u not in [l[1] for l in links]:
             links.append(("", u))
     seen, uniq = set(), []
@@ -84,13 +77,13 @@ def parse(data: Any) -> Result:
             seen.add(u)
             uniq.append((t, u))
     if isinstance(data, dict) and isinstance(data.get("tasks"), list):
-        passed = len(data["tasks"]) == 0  # Traffy вернул задания (спонсоров) — значит, надо подписаться
+        passed = len(data["tasks"]) == 0
     elif flags:
         passed = all(flags) if any(flags) else False
         if passed is False and not uniq and not text:
-            passed = True  # «не пройдено», но показывать нечего — не держим человека
+            passed = True
     else:
-        passed = not uniq  # без явного флага: нет спонсорских ссылок = пускаем
+        passed = not uniq
     return Result(passed=passed, text=text, links=uniq[:8], raw=data)
 
 
@@ -104,7 +97,6 @@ async def check(user_id: int, use_cache: bool = True) -> Result:
     try:
         timeout = aiohttp.ClientTimeout(total=8)
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            # редиректы идём вручную: aiohttp на 301/302 превращает POST в GET
             for _ in range(4):
                 async with s.post(url, json={"tg_id": user_id}, headers=headers, allow_redirects=False) as r:
                     if r.status in (301, 302, 303, 307, 308) and r.headers.get("Location"):
@@ -122,7 +114,7 @@ async def check(user_id: int, use_cache: bool = True) -> Result:
                     break
             else:
                 return Result(True, error="слишком много редиректов")
-    except Exception as e:  # сеть/таймаут — не блокируем людей
+    except Exception as e:
         log.warning("Traffy недоступен: %s", e)
         return Result(True, error=str(e))
     res = parse(data)
@@ -148,7 +140,6 @@ POST_PATHS = [
 
 
 async def probe(tg_id: int) -> list[str]:
-    """Диагностика: ищем документацию и живые пути (всё, что не 404, — кандидат)."""
     base = config.TRAFFY_URL.split("/publisher")[0].rstrip("/")
     h = {"x-publisher-api-key": config.TRAFFY_API_KEY, "Content-Type": "application/json"}
     out: list[str] = []
@@ -184,7 +175,6 @@ async def probe(tg_id: int) -> list[str]:
 
 
 async def fetch_docs() -> str:
-    """Текст страницы документации Traffy (для диагностики)."""
     import html as _h
     base = config.TRAFFY_URL.split("/publisher")[0].rstrip("/")
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:

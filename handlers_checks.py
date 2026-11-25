@@ -1,4 +1,3 @@
-"""Админка: чеки (создание, пост для канала, публикация, управление)."""
 from __future__ import annotations
 
 import logging
@@ -40,9 +39,7 @@ class C(StatesGroup):
     publish = State()
 
 
-# ───────────── утилиты ─────────────
 async def say(event: Message | CallbackQuery, text: str, markup=None) -> None:
-    """Отвечает на сообщение или правит сообщение с кнопкой — в зависимости от источника."""
     if isinstance(event, CallbackQuery):
         await event.answer()
         await show(event, text, markup)
@@ -51,7 +48,6 @@ async def say(event: Message | CallbackQuery, text: str, markup=None) -> None:
 
 
 def parse_duration(text: str) -> int | None:
-    """'30м', '12ч', '2д' (также m/h/d) -> секунды. От 1 минуты до 365 дней."""
     m = re.fullmatch(r"(\d{1,6})\s*(м|мин|m|min|ч|час|h|д|дн|d)", (text or "").strip().lower())
     if not m:
         return None
@@ -73,7 +69,6 @@ def check_link(chk) -> str:
 
 
 def post_text(chk) -> str:
-    """Текст публикации для канала (пароль в нём не раскрывается)."""
     if chk.max_people is not None:
         text = (
             f"🧾 <b>Чек на {fmt_short(chk.per_person * chk.max_people)} ⭐</b>\n{LINE}\n\n"
@@ -119,7 +114,6 @@ async def show_card(event: Message | CallbackQuery, chk) -> None:
     await say(event, card_text(chk), kb.check_detail_kb(chk))
 
 
-# ───────────── список ─────────────
 @router.callback_query(F.data == "a:checks")
 async def cb_checks(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -167,7 +161,6 @@ async def cb_check_acts(cb: CallbackQuery) -> None:
     await show(cb, text, kb.back(f"a:chk:{cid}"))
 
 
-# ───────────── пост и публикация ─────────────
 @router.callback_query(F.data.startswith("a:chk_post:"))
 async def cb_check_post(cb: CallbackQuery) -> None:
     chk = await services.get_check(int(cb.data.split(":")[2]))
@@ -197,7 +190,6 @@ async def cb_check_publish(cb: CallbackQuery, state: FSMContext) -> None:
 
 
 async def publish(bot: Bot, chk, chat_id: int) -> str | None:
-    """None — успех, иначе текст ошибки."""
     try:
         await bot.send_message(chat_id, post_text(chk), reply_markup=kb.check_post_kb(check_link(chk)))
     except TelegramAPIError as e:
@@ -235,7 +227,6 @@ async def msg_check_publish(message: Message, state: FSMContext, bot: Bot) -> No
     await show_card(message, chk)
 
 
-# ───────────── создание ─────────────
 @router.callback_query(F.data == "a:chk_new")
 async def cb_check_new(cb: CallbackQuery, state: FSMContext) -> None:
     await state.clear()

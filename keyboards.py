@@ -7,7 +7,6 @@ import services
 import settings
 from utils import fmt_short
 
-# Цвета кнопок в Telegram — всего три: success (зелёный), primary (синий), danger (красный).
 G, P, R = "success", "primary", "danger"
 
 
@@ -19,7 +18,6 @@ def back(to: str = "menu", text: str = "⬅️ Назад") -> Kb:
     return Kb(inline_keyboard=[[B(text, to)]])
 
 
-# ───────────── пользователь ─────────────
 def main_menu(is_admin: bool = False) -> Kb:
     rows = [
         [B("⭐ Заработать звёзды", "earn", style=G)],
@@ -84,7 +82,6 @@ def sponsors_wall(tasks) -> Kb:
     return Kb(inline_keyboard=rows)
 
 
-# ───────────── админка ─────────────
 def admin_menu(pending_withdrawals: int = 0) -> Kb:
     wd_text = f"💫 Заявки на вывод ({pending_withdrawals})" if pending_withdrawals else "💫 Заявки на вывод"
     return Kb(
@@ -190,7 +187,6 @@ def setting_edit_kb(key: str) -> Kb:
     )
 
 
-# ───────────── заявки на вывод ─────────────
 def wd_request_kb(withdrawal_id: int, user_id: int) -> Kb:
     return Kb(
         inline_keyboard=[
@@ -207,7 +203,6 @@ def wd_request_kb(withdrawal_id: int, user_id: int) -> Kb:
 
 
 def wd_list_kb(items, back_to: str = "a:menu", history: bool = False, reject_all: int = 0) -> Kb:
-    """items: [(Withdrawal, User)]; reject_all — сколько заявок в ожидании (>0 → кнопка «Отклонить все»)."""
     rows = []
     for w, u in items:
         mark = {"pending": "⏳", "done": "✅", "rejected": "❌"}[w.status]
@@ -223,7 +218,6 @@ def wd_list_kb(items, back_to: str = "a:menu", history: bool = False, reject_all
 
 
 def wd_reject_all_kb() -> Kb:
-    """Массовое отклонение: выбор — с уведомлением пользователей или без."""
     return Kb(
         inline_keyboard=[
             [B("🔕 Отклонить все — без уведомления", "a:wd_all:silent", style=R)],
@@ -252,7 +246,6 @@ def wd_detail_kb(withdrawal_id: int, user_id: int, pending: bool) -> Kb:
     return Kb(inline_keyboard=rows)
 
 
-# ───────────── чеки ─────────────
 def checks_list_kb(checks) -> Kb:
     rows = [[B("➕ Создать чек", "a:chk_new", style=G)]]
     for c in checks:

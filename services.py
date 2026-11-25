@@ -1,4 +1,3 @@
-"""Вся работа с БД. Суммы везде в сотых долях звезды."""
 from __future__ import annotations
 
 import asyncio
@@ -18,9 +17,7 @@ import settings
 from db import Channel, ChannelMiss, ChannelPass, Check, CheckActivation, FraudEvent, OldReferral, SessionLocal, Task, Transaction, User, UserTask, Withdrawal, WithdrawalNotice, utcnow
 
 
-# ───────────────────────── пользователи ─────────────────────────
 async def register_user(tg_user, referrer_id: Optional[int] = None) -> tuple[User, bool]:
-    """Создаёт пользователя при первом заходе. Реферер фиксируется только тогда."""
     async with SessionLocal() as s:
         user = await s.get(User, tg_user.id)
         if user:
@@ -53,7 +50,7 @@ async def register_user(tg_user, referrer_id: Optional[int] = None) -> tuple[Use
         s.add(user)
         try:
             await s.commit()
-        except IntegrityError:  # параллельный /start
+        except IntegrityError:
             await s.rollback()
             return await s.get(User, tg_user.id), False
         return user, True
@@ -88,8 +85,6 @@ async def set_hide_top(user_id: int, hidden: bool) -> None:
 
 
 async def set_banned(user_id: int, banned: bool) -> Optional[dict]:
-    """Бан/разбан. При бане ВСЕ данные пользователя чистятся автоматически (purge_user_data) —
-    возвращается отчёт о том, что удалено. При разбане сбрасываются очки подозрительности."""
     async with SessionLocal() as s:
         await s.execute(update(User).where(User.id == user_id).values(is_banned=banned))
         await s.commit()
@@ -100,13 +95,6 @@ async def set_banned(user_id: int, banned: bool) -> Optional[dict]:
 
 
 async def purge_user_data(user_id: int) -> dict:
-    """Чистка забаненного, одной транзакцией:
-      • заявки на вывод в ожидании и отклонённые + служебные сообщения о них у админов;
-      • баланс обнуляется (записью «ban_wipe» в историю — можно вернуть вручную, если бан ошибочный);
-      • активации чеков (место в чеке освобождается);
-      • отметки подписок на каналы (чтобы не накручивать статистику каналов);
-      • награда, выданная его рефереру за него, возвращается (clawback), а сам он выпадает из ТОПа рефералов.
-    Закрытые (выплаченные) заявки остаются — это бухгалтерия: звёзды реально ушли."""
     report = {"withdrawals": 0, "balance": 0, "checks": 0, "clawback": 0, "referrer_id": None, "notices": []}
     async with SessionLocal() as s:
         user = await s.get(User, user_id)
@@ -158,7 +146,6 @@ async def purge_user_data(user_id: int) -> dict:
                     s.add(Transaction(user_id=referrer.id, amount=-back, kind="clawback", note=f"возврат награды: друг {user_id} забанен"))
                 report["clawback"], report["referrer_id"] = back, referrer.id
 
-        # награда за «старого друга» тоже возвращается; запись в old_referrals остаётся — повторно за него не заплатим
         old_ref = (await s.execute(select(OldReferral).where(OldReferral.invited_id == user_id))).scalars().first()
         if old_ref:
             inviter = await s.get(User, old_ref.inviter_id)
@@ -176,7 +163,6 @@ async def purge_user_data(user_id: int) -> dict:
 
 
 async def referral_counts(user_id: int) -> tuple[int, int]:
-    """(всего приглашено, засчитано)."""
     async with SessionLocal() as s:
         row = (
             await s.execute(
@@ -189,15 +175,7 @@ async def referral_counts(user_id: int) -> tuple[int, int]:
         return int(row[0]), int(row[1])
 
 
-# ───────────────────────── старые друзья ─────────────────────────
 async def old_referral_eligible(user_id: int, referrer_id: int) -> bool:
-    """Можно ли засчитать user_id как «старого друга» для referrer_id.
-
-    ВАЖНО: вызывать ДО register_user — он обновляет last_active при любом заходе, и «неделю не заходил» уже не проверить.
-    Условия: человек уже есть в базе, не админ и не забанен; не приглашал его же этот реферер раньше (он и так его реферал);
-    за последние N дней (настройка, по умолчанию 7) — не заходил в бота вообще, не делал заданий, не приводил новых рефералов
-    и не создавал заявок на вывод; за него ещё ни разу не платили (один человек — одна награда за всё время).
-    """
     if not referrer_id or referrer_id == user_id or user_id in config.ADMIN_IDS:
         return False
     cutoff = utcnow() - timedelta(days=settings.old_ref_days())
@@ -223,8 +201,6 @@ async def old_referral_eligible(user_id: int, referrer_id: int) -> bool:
 
 
 async def pay_old_referral(user_id: int, referrer_id: int) -> Optional[dict]:
-    """Начисляет награду за старого друга. None — нельзя (бан, подозрение, уже платили).
-    {'burst': True} — слишком много старых друзей за 10 минут (ничего не начислено, нужно отметить фрод)."""
     reward = settings.old_ref_reward()
     async with SessionLocal() as s:
         user, referrer = await s.get(User, user_id), await s.get(User, referrer_id)
@@ -241,7 +217,7 @@ async def pay_old_referral(user_id: int, referrer_id: int) -> Optional[dict]:
         s.add(OldReferral(inviter_id=referrer_id, invited_id=user_id, amount=reward))
         try:
             await s.flush()
-        except IntegrityError:  # параллельный /start — уже заплатили
+        except IntegrityError:
             await s.rollback()
             return None
         await s.execute(
@@ -259,9 +235,7 @@ async def old_referral_count(user_id: int) -> int:
         return int(await s.scalar(select(func.count(OldReferral.id)).where(OldReferral.inviter_id == user_id)) or 0)
 
 
-# ───────────────────────── полный сброс ─────────────────────────
 def _backup_db() -> Optional[str]:
-    """Копия SQLite-базы перед сбросом (bot.db-backup-ГГГГММДД-ЧЧММСС — под .gitignore `bot.db-*`)."""
     if not config.DB_URL.startswith("sqlite"):
         return None
     src = config.DB_URL.split("///", 1)[-1]
@@ -272,7 +246,6 @@ def _backup_db() -> Optional[str]:
 
 
 async def reset_preview() -> dict:
-    """Сколько всего будет затронуто сбросом (для подтверждения)."""
     async with SessionLocal() as s:
         non_admin = User.id.not_in(config.ADMIN_IDS)
         return {
@@ -286,9 +259,6 @@ async def reset_preview() -> dict:
 
 
 async def reset_all_users() -> dict:
-    """Обнуляет ВСЕХ, кроме админов (ADMIN_IDS): звёзды, статистику, историю — как будто только что зашли в бота. Одной транзакцией,
-    перед этим — копия базы. Остаются: сами аккаунты (ник, Premium), баны и «скрыт из топа», отметки подписок на каналы, «доверенный»,
-    дата регистрации. Реферальная связь сохраняется только у тех, кого пригласил админ (чтобы не менять статистику админов)."""
     backup = await asyncio.to_thread(_backup_db)
     admins = config.ADMIN_IDS
     report: dict = {"backup": backup, "notices": []}
@@ -307,7 +277,6 @@ async def reset_all_users() -> dict:
         await s.execute(delete(OldReferral).where(OldReferral.inviter_id.not_in(admins)))
         await s.execute(delete(FraudEvent).where(FraudEvent.user_id.not_in(admins), FraudEvent.kind.not_in(("trusted", "premium"))))
 
-        # реферальная связь: убираем у всех, кроме приглашённых админами
         await s.execute(
             update(User)
             .where(User.id.not_in(admins), or_(User.referrer_id.is_(None), User.referrer_id.not_in(admins)))
@@ -346,7 +315,6 @@ async def last_transactions(user_id: int, limit: int = 5) -> list[Transaction]:
         )
 
 
-# ───────────────────────── задания ─────────────────────────
 async def next_task(user_id: int) -> Optional[Task]:
     async with SessionLocal() as s:
         seen = select(UserTask.task_id).where(UserTask.user_id == user_id)
@@ -358,7 +326,6 @@ async def next_task(user_id: int) -> Optional[Task]:
 
 
 async def get_net_task(source: str, title: str, url: str) -> Task:
-    """Локальная запись задания от рекламной сети (одна на ссылку) — чтобы работали награда, лимиты и учёт."""
     async with SessionLocal() as s:
         t = (await s.execute(select(Task).where(Task.source == source, Task.url == url[:500]))).scalars().first()
         if t is None:
@@ -379,7 +346,6 @@ async def get_task(task_id: int) -> Optional[Task]:
 
 
 async def _cooldown_wait(s, user_id: int) -> int:
-    """Секунд до следующего разрешённого задания (0 — можно). Окно скользящее, 60 секунд."""
     limit = settings.task_rate()
     now = utcnow()
     recent = list(
@@ -407,12 +373,6 @@ async def task_cooldown(user_id: int) -> int:
 
 
 async def complete_task(user_id: int, task_id: int) -> Optional[dict]:
-    """Начисляет награду за задание. None — нельзя (уже сделано / задание удалено или выключено).
-
-    Если превышен лимит заданий в минуту — {'wait': секунд}, ничего не начисляется.
-    Иначе {'reward': int, 'referrer_id': int | None, 'ref_reward': int} — referrer_id заполнен,
-    если именно это задание стало нужным по счёту и реферер получил свою награду.
-    """
     reward = settings.task_reward()
     ref_reward = settings.ref_reward()
     ref_needed = settings.ref_tasks()
@@ -420,7 +380,7 @@ async def complete_task(user_id: int, task_id: int) -> Optional[dict]:
         task = await s.get(Task, task_id)
         if not task or not task.is_active:
             return None
-        if task.reward:  # у задания своя цена, заданная админом; иначе — стандартная
+        if task.reward:
             reward = int(task.reward)
 
         wait = await _cooldown_wait(s, user_id)
@@ -451,8 +411,6 @@ async def complete_task(user_id: int, task_id: int) -> Optional[dict]:
 
         hold = False
         if user.referrer_id and not user.ref_counted and user.tasks_done >= ref_needed:
-            # награду за реферала не выдаём, пока сам он или его реферер под подозрением / забанен:
-            # она не пропадает — выдастся на следующем задании, когда подозрение снимут
             referrer_row = await s.get(User, user.referrer_id)
             hold = (
                 referrer_row is None
@@ -511,7 +469,6 @@ async def add_task(title: str, url: str, chat_id: Optional[int], reward: Optiona
 
 
 async def list_tasks() -> list[tuple[Task, int]]:
-    """Задания с числом выполнений."""
     async with SessionLocal() as s:
         rows = (
             await s.execute(
@@ -544,19 +501,16 @@ async def delete_task(task_id: int) -> None:
         await s.commit()
 
 
-# ───────────────────────── каналы ─────────────────────────
 async def list_channels() -> list[Channel]:
     async with SessionLocal() as s:
         return list((await s.execute(select(Channel).order_by(Channel.id))).scalars())
 
 
 async def add_channel(chat_id: Optional[int], title: str, url: str, check_enabled: bool = True, is_link: bool = False) -> bool:
-    """chat_id=None допустим только без проверки: тогда подставляется служебный отрицательный ID
-    (вне диапазона настоящих чатов Telegram) — он нужен лишь из-за уникальности поля и в API не передаётся."""
     if chat_id is None:
         chat_id = -9_000_000_000_000_000 - secrets.randbelow(10**12)
     async with SessionLocal() as s:
-        if is_link or not check_enabled:  # одинаковую ссылку дважды не добавляем
+        if is_link or not check_enabled:
             dup = (await s.execute(select(Channel.id).where(Channel.url == url))).first()
             if dup:
                 return False
@@ -590,12 +544,11 @@ async def confirm_channels(user_id: int, channel_ids: list[int]) -> None:
                 s.add(ChannelPass(user_id=user_id, channel_id=cid))
         try:
             await s.commit()
-        except IntegrityError:  # параллельное подтверждение — уже записано
+        except IntegrityError:
             await s.rollback()
 
 
 async def mark_missing(user_id: int, channel_ids: list[int]) -> None:
-    """Запоминаем: на этих каналах с проверкой человек не был подписан, когда пришёл в бота."""
     async with SessionLocal() as s:
         have = set((await s.execute(select(ChannelMiss.channel_id).where(ChannelMiss.user_id == user_id))).scalars())
         new = [c for c in channel_ids if c not in have]
@@ -610,7 +563,6 @@ async def mark_missing(user_id: int, channel_ids: list[int]) -> None:
 
 
 async def convert_passes(user_id: int, channel_ids: list[int]) -> None:
-    """Человек теперь подписан на каналы с проверкой. Если раньше он не был подписан — это подписка «с нашего бота»."""
     async with SessionLocal() as s:
         missed = set(
             (await s.execute(select(ChannelMiss.channel_id).where(ChannelMiss.user_id == user_id, ChannelMiss.channel_id.in_(channel_ids)))).scalars()
@@ -627,14 +579,12 @@ async def convert_passes(user_id: int, channel_ids: list[int]) -> None:
 
 
 async def channel_counts() -> dict[int, int]:
-    """channel_id -> сколько человек подписались/выполнили условие через бота."""
     async with SessionLocal() as s:
         rows = (await s.execute(select(ChannelPass.channel_id, func.count(ChannelPass.id)).group_by(ChannelPass.channel_id))).all()
         return {r[0]: int(r[1]) for r in rows}
 
 
 async def seed_default_channel() -> None:
-    """Канал бота подключается как обязательный один раз — на самом первом запуске."""
     async with SessionLocal() as s:
         if await s.scalar(select(func.count(Channel.id))) == 0 and not await s.scalar(
             select(func.count(User.id))
@@ -649,9 +599,7 @@ async def seed_default_channel() -> None:
             await s.commit()
 
 
-# ───────────────────────── баланс (админка) ─────────────────────────
 async def deduct_balance(user_id: int, cents: int, admin_id: int) -> Optional[int]:
-    """Списывает не больше, чем есть на балансе. Возвращает списанную сумму (None — нет юзера)."""
     async with SessionLocal() as s:
         user = await s.get(User, user_id)
         if not user:
@@ -670,7 +618,6 @@ async def deduct_balance(user_id: int, cents: int, admin_id: int) -> Optional[in
         return actual
 
 
-# ───────────────────────── статистика ─────────────────────────
 async def public_stats() -> dict:
     async with SessionLocal() as s:
         users = await s.scalar(select(func.count(User.id)).where(User.id.not_in(config.HIDDEN_IDS)))
@@ -719,7 +666,6 @@ async def admin_counters() -> dict:
 
 
 async def top_by(field: str, limit: int = 10) -> list[tuple[User, int]]:
-    """field: balance | earned | refs."""
     async with SessionLocal() as s:
         if field == "refs":
             cnt = func.count(User.id).label("cnt")
@@ -785,7 +731,6 @@ async def broadcast_counts() -> dict[str, int]:
 
 
 async def add_bonus(user_id: int, cents: int, admin_id: int) -> bool:
-    """Ручное начисление от админа."""
     async with SessionLocal() as s:
         res = await s.execute(
             update(User)
@@ -837,10 +782,7 @@ async def export_users() -> list[dict]:
     ]
 
 
-
-# ───────────── заявки на вывод ─────────────
 async def reserved_for_withdrawals(user_id: int) -> int:
-    """Сколько звёзд сейчас «заморожено» в ожидающих заявках."""
     async with SessionLocal() as s:
         v = await s.scalar(
             select(func.coalesce(func.sum(Withdrawal.amount), 0)).where(
@@ -851,7 +793,6 @@ async def reserved_for_withdrawals(user_id: int) -> int:
 
 
 async def create_withdrawal(user_id: int, stars: int) -> Optional[Withdrawal]:
-    """Создаёт заявку, если свободного (не занятого другими заявками) баланса хватает."""
     cents = stars * 100
     async with SessionLocal() as s:
         user = await s.get(User, user_id)
@@ -892,7 +833,6 @@ async def get_withdrawal(withdrawal_id: int) -> Optional[tuple[Withdrawal, User]
 
 
 async def list_withdrawals(status: str, limit: int = 20) -> list[tuple[Withdrawal, User]]:
-    """status: pending | closed (done + rejected)."""
     async with SessionLocal() as s:
         q = select(Withdrawal, User).join(User, User.id == Withdrawal.user_id)
         if status == "pending":
@@ -919,7 +859,6 @@ async def pending_withdrawal_count() -> int:
 
 
 async def user_withdrawal_stats(user_id: int) -> tuple[int, int]:
-    """(ожидают, выполнено)."""
     async with SessionLocal() as s:
         rows = (
             await s.execute(
@@ -931,10 +870,6 @@ async def user_withdrawal_stats(user_id: int) -> tuple[int, int]:
 
 
 async def close_withdrawal(withdrawal_id: int, admin_id: int) -> tuple[str, Optional[Withdrawal]]:
-    """Закрывает заявку и списывает звёзды с баланса.
-
-    -> ('ok' | 'missing' | 'already' | 'insufficient', заявка)
-    """
     async with SessionLocal() as s:
         w = await s.get(Withdrawal, withdrawal_id)
         if not w:
@@ -944,7 +879,6 @@ async def close_withdrawal(withdrawal_id: int, admin_id: int) -> tuple[str, Opti
         user = await s.get(User, w.user_id)
         if not user or user.balance < w.amount:
             return "insufficient", w
-        # статус и списание — одной транзакцией; повторное нажатие второго админа ничего не спишет
         claim = await s.execute(
             update(Withdrawal)
             .where(Withdrawal.id == withdrawal_id, Withdrawal.status == "pending")
@@ -974,7 +908,6 @@ async def close_withdrawal(withdrawal_id: int, admin_id: int) -> tuple[str, Opti
 
 
 async def reject_withdrawal(withdrawal_id: int, admin_id: int) -> tuple[str, Optional[Withdrawal]]:
-    """Отклоняет заявку без списания. -> ('ok' | 'missing' | 'already', заявка)"""
     async with SessionLocal() as s:
         w = await s.get(Withdrawal, withdrawal_id)
         if not w:
@@ -993,11 +926,6 @@ async def reject_withdrawal(withdrawal_id: int, admin_id: int) -> tuple[str, Opt
 
 
 async def reject_all_withdrawals(admin_id: int) -> list[tuple[Withdrawal, User]]:
-    """Массово отклоняет ВСЕ заявки в ожидании (звёзды с балансов не списываются).
-
-    Один UPDATE по статусу pending: заявки, которые другой админ успел закрыть/отклонить, не затрагиваются,
-    а повторный вызов вернёт пустой список. -> [(заявка, пользователь)] только тех, что отклонены этим вызовом.
-    """
     async with SessionLocal() as s:
         now = utcnow()
         res = await s.execute(
@@ -1018,9 +946,7 @@ async def reject_all_withdrawals(admin_id: int) -> list[tuple[Withdrawal, User]]
         return [(r[0], r[1]) for r in rows.all()]
 
 
-# ───────────── чеки ─────────────
 def check_channels(chk: Check) -> list[dict]:
-    """[{'chat_id', 'title', 'url'}] — подписки, нужные для активации."""
     try:
         return json.loads(chk.channels or "[]")
     except ValueError:
@@ -1050,7 +976,7 @@ async def create_check(
             try:
                 await s.commit()
                 return chk
-            except IntegrityError:  # коллизия кода — крайне маловероятна
+            except IntegrityError:
                 await s.rollback()
         raise RuntimeError("не удалось сгенерировать уникальный код чека")
 
@@ -1104,7 +1030,6 @@ async def has_activated(check_id: int, user_id: int) -> bool:
 
 
 def check_problem(chk: Check) -> Optional[str]:
-    """'inactive' | 'expired' | 'exhausted' | None."""
     if not chk.is_active:
         return "inactive"
     if chk.expires_at and chk.expires_at <= utcnow():
@@ -1115,11 +1040,6 @@ def check_problem(chk: Check) -> Optional[str]:
 
 
 async def activate_check(user_id: int, code: str) -> tuple[str, Optional[Check], int]:
-    """Зачисляет звёзды за чек одним действием.
-
-    -> ('ok' | 'missing' | 'inactive' | 'expired' | 'exhausted' | 'already', чек, начислено_в_сотых)
-    Пароль и подписки проверяет вызывающий код — тут только то, что должно быть атомарным.
-    """
     async with SessionLocal() as s:
         chk = (await s.execute(select(Check).where(Check.code == code))).scalars().first()
         if not chk:
@@ -1135,7 +1055,6 @@ async def activate_check(user_id: int, code: str) -> tuple[str, Optional[Check],
             await s.rollback()
             return "already", chk, 0
 
-        # занимаем «место» в чеке; если параллельно ушло последнее — откатываемся
         slot = await s.execute(
             update(Check)
             .where(
@@ -1160,9 +1079,7 @@ async def activate_check(user_id: int, code: str) -> tuple[str, Optional[Check],
         return "ok", chk, chk.per_person
 
 
-# ───────────────────────── журнал действий (audit.py) ─────────────────────────
-# Оборачиваем ключевые операции: логика не меняется, лишь пишется строка в actions.log.
-import audit  # noqa: E402
+import audit
 
 
 def _stars(cents: int) -> str:
@@ -1177,7 +1094,7 @@ def _audited(name: str):
             res = await orig(*a, **kw)
             try:
                 fmt(res, *a, **kw)
-            except Exception:  # noqa: BLE001 — журнал не должен ломать операции
+            except Exception:
                 pass
             return res
 

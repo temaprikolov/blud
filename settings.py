@@ -1,4 +1,3 @@
-"""Настройки, редактируемые из админки. Хранятся в БД, читаются из кэша в памяти."""
 from __future__ import annotations
 
 from sqlalchemy import select
@@ -7,7 +6,7 @@ import config
 from db import SessionLocal, Setting
 
 DEFAULTS: dict[str, str] = {
-    "task_reward": str(config.TASK_REWARD),  # сотые доли звезды
+    "task_reward": str(config.TASK_REWARD),
     "ref_reward": str(config.REF_REWARD),
     "ref_tasks": str(config.REF_TASKS_REQUIRED),
     "withdraw_amounts": ",".join(str(a) for a in config.WITHDRAW_AMOUNTS),

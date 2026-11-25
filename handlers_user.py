@@ -29,9 +29,9 @@ router = Router(name="user")
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 
-MIN_TASK_SECONDS = 10  # для заданий без автопроверки: не раньше, чем через N секунд после показа
+MIN_TASK_SECONDS = 10
 _shown: dict[tuple[int, int], float] = {}
-_net: dict[tuple[int, int], sponsors.Task] = {}  # (user, локальный task_id) -> задание рекламной сети
+_net: dict[tuple[int, int], sponsors.Task] = {}
 
 LINE = "━━━━━━━━━━━━━━━━━━"
 
@@ -41,7 +41,6 @@ def title(emoji: str, text: str) -> str:
 
 
 async def show(cb: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
-    """Редактирует текущее сообщение, а если нельзя — отправляет новое."""
     try:
         await cb.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
     except TelegramBadRequest as e:
@@ -65,9 +64,7 @@ class UserS(StatesGroup):
     check_password = State()
 
 
-# ───────────── старый друг ─────────────
 async def claim_old_ref(bot: Bot, user) -> None:
-    """Платит рефереру за «старого друга», когда тот прошёл стены подписки (см. services.old_referral_eligible)."""
     pend = PENDING_OLD_REFS.pop(user.id, None)
     if not pend or time.time() - pend[1] > 3600:
         return
@@ -87,18 +84,17 @@ async def claim_old_ref(bot: Bot, user) -> None:
         )
     except TelegramAPIError:
         pass
-    except Exception as e:  # noqa: BLE001 — награда за старого друга не должна ломать вход
+    except Exception as e:
         log.warning("old referral pay: %s", e)
 
 
-# ───────────── старт / меню ─────────────
 @router.message(CommandStart())
 async def cmd_start(message: Message, user, is_admin: bool, state: FSMContext, bot: Bot) -> None:
     await state.set_state(None)
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1] if len(parts) == 2 else ""
     if payload.startswith("chk_"):
-        PENDING_CHECKS.pop(user.id, None)  # дошли до обработчика — подписки в порядке, активируем сразу
+        PENDING_CHECKS.pop(user.id, None)
         await process_check(bot, state, user, payload[4:], message.answer)
         return
     fresh = await services.get_user(user.id)
@@ -112,19 +108,18 @@ async def cb_menu(cb: CallbackQuery, user, is_admin: bool, state: FSMContext, bo
     if cb.data == "check_sub":
         forget_sub_cache(user.id)
     fresh = await services.get_user(user.id)
-    try:  # после ожидания на стене подписки callback может быть уже «протухшим» — это не ошибка
+    try:
         await cb.answer("✅ Подписка подтверждена" if cb.data == "check_sub" else None)
     except TelegramAPIError:
         pass
     await show(cb, menu_text(fresh), kb.main_menu(is_admin))
     if cb.data == "check_sub":
         code = PENDING_CHECKS.pop(user.id, None)
-        if code:  # человек открыл чек до подписки — активируем теперь
+        if code:
             await process_check(bot, state, user, code, cb.message.answer)
         await claim_old_ref(bot, fresh)
 
 
-# ───────────── чеки ─────────────
 MENU_KB = InlineKeyboardMarkup(inline_keyboard=[[kb.B("🏠 В меню", "menu", style=kb.P)]])
 CHECK_PROBLEMS = {
     "missing": "❌ Чек не найден. Проверь ссылку.",
@@ -134,11 +129,10 @@ CHECK_PROBLEMS = {
     "already": "ℹ️ Ты уже активировал этот чек.",
 }
 _pw_fails: dict[tuple[int, str], list[float]] = {}
-PW_TRIES, PW_WINDOW = 5, 600  # 5 неверных паролей за 10 минут — пауза
+PW_TRIES, PW_WINDOW = 5, 600
 
 
 async def process_check(bot: Bot, state: FSMContext, user, code: str, reply) -> None:
-    """Пароль -> подписки -> зачисление. reply(text, markup) — куда отвечать."""
     chk = await services.get_check_by_code(code)
     if not chk:
         await reply(CHECK_PROBLEMS["missing"], reply_markup=MENU_KB)
@@ -231,7 +225,6 @@ async def msg_check_password(message: Message, user, state: FSMContext, bot: Bot
     await process_check(bot, state, user, code, message.answer)
 
 
-# ───────────── задания ─────────────
 @router.callback_query(F.data == "earn")
 async def cb_earn(cb: CallbackQuery, user) -> None:
     fresh = await services.get_user(user.id)
@@ -257,7 +250,6 @@ def cooldown_text(wait: int) -> str:
 
 
 async def net_next(u):
-    """Следующее задание от рекламных сетей, которое этот человек ещё не делал и не пропускал."""
     if not sponsors.enabled():
         return None
     for nt in await sponsors.fetch(u, limit=10):
@@ -269,7 +261,6 @@ async def net_next(u):
 
 
 async def send_next_task(cb: CallbackQuery, user_id: int) -> None:
-    """Свои задания админов и задания рекламных сетей чередуются; если одного вида нет — берём другой."""
     fresh = await services.get_user(user_id)
     own_first = ((fresh.tasks_done + fresh.tasks_skipped) % 2 == 0) if fresh else True
     task, desc, url = None, "", ""
@@ -330,7 +321,7 @@ async def cb_task_check(cb: CallbackQuery, user, bot: Bot) -> None:
     net = None
     if task.source != "own":
         net = _net.get((user.id, task_id))
-        if net is None:  # после перезапуска бота — восстанавливаем из выдачи сети
+        if net is None:
             net = next((n for n in await sponsors.fetch(cb.from_user, limit=10) if n.uid == task.url), None)
         if net is None:
             await cb.answer("Это задание уже недоступно", show_alert=True)
@@ -340,13 +331,13 @@ async def cb_task_check(cb: CallbackQuery, user, bot: Bot) -> None:
 
     if net is not None:
         state = await sponsors.task_state(cb.from_user, net)
-        if state == "gone":  # сеть сняла задание — не мучаем человека, берём следующее
+        if state == "gone":
             await cb.answer("Это задание уже снято, даю другое", show_alert=False)
             await services.skip_task(user.id, task_id)
             _net.pop((user.id, task_id), None)
             await send_next_task(cb, user.id)
             return
-        if state == "error":  # сеть не ответила — это не вина человека
+        if state == "error":
             await cb.answer("⚠️ Сеть заданий не ответила. Нажми «Проверить» ещё раз через пару секунд.", show_alert=True)
             return
         if state != "done":
@@ -357,7 +348,6 @@ async def cb_task_check(cb: CallbackQuery, user, bot: Bot) -> None:
         if member is False:
             await cb.answer("❌ Условие не выполнено. Подпишись и нажми «Проверить» ещё раз.", show_alert=True)
             return
-        # member is None — бот не смог проверить (не админ канала): не лишаем человека награды
     else:
         shown = _shown.get((user.id, task_id))
         if shown is None:
@@ -382,7 +372,6 @@ async def cb_task_check(cb: CallbackQuery, user, bot: Bot) -> None:
     _net.pop((user.id, task_id), None)
     await cb.answer(f"✅ +{fmt_short(result['reward'])} ⭐ зачислено!", show_alert=False)
 
-    # анти-фрод: слишком быстрая проверка, машинный ритм, активность сутками; набрал очков — бан / заморозка
     try:
         if shown_at is not None:
             await fraud.on_fast_click(user.id, time.time() - shown_at)
@@ -390,7 +379,7 @@ async def cb_task_check(cb: CallbackQuery, user, bot: Bot) -> None:
         await moderation.evaluate(bot, user.id)
         if user.referrer_id:
             await moderation.evaluate(bot, user.referrer_id)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("anti-fraud after task: %s", e)
     if (await services.get_user(user.id)).is_banned:
         return
@@ -417,7 +406,6 @@ async def cb_task_skip(cb: CallbackQuery, user) -> None:
     await send_next_task(cb, user.id)
 
 
-# ───────────── рефералы ─────────────
 @router.callback_query(F.data == "refs")
 async def cb_refs(cb: CallbackQuery, user) -> None:
     total, counted = await services.referral_counts(user.id)
@@ -447,7 +435,6 @@ async def cb_refs(cb: CallbackQuery, user) -> None:
     )
 
 
-# ───────────── профиль ─────────────
 @router.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery, user) -> None:
     fresh = await services.get_user(user.id)
@@ -470,9 +457,8 @@ async def cb_profile(cb: CallbackQuery, user) -> None:
     )
 
 
-# ───────────── вывод ─────────────
-_task_locks: dict[int, asyncio.Lock] = {}  # один человек — одна проверка задания за раз
-_wd_locks: dict[int, asyncio.Lock] = {}  # защита от двойного нажатия: две заявки на один и тот же баланс
+_task_locks: dict[int, asyncio.Lock] = {}
+_wd_locks: dict[int, asyncio.Lock] = {}
 
 STATUS_LABEL = {"pending": "⏳ ожидает", "done": "✅ выполнена", "rejected": "❌ отклонена"}
 
@@ -553,7 +539,6 @@ async def cb_my_withdrawals(cb: CallbackQuery, user) -> None:
     await show(cb, text, kb.back("withdraw"))
 
 
-# ───────────── статистика ─────────────
 @router.callback_query(F.data == "stats")
 async def cb_stats(cb: CallbackQuery) -> None:
     st = await services.public_stats()

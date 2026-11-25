@@ -25,7 +25,6 @@ class User(Base):
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(256), default="")
 
-    # суммы в сотых долях звезды
     balance: Mapped[int] = mapped_column(Integer, default=0)
     earned: Mapped[int] = mapped_column(Integer, default=0)
     ref_earned: Mapped[int] = mapped_column(Integer, default=0)
@@ -34,16 +33,13 @@ class User(Base):
     tasks_skipped: Mapped[int] = mapped_column(Integer, default=0)
 
     referrer_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
-    ref_counted: Mapped[bool] = mapped_column(Boolean, default=False)  # награда рефереру уже выдана
-    # засчитан в ТОП рефералов (топ обнулён 24.10.2026: учитываются только друзья, засчитанные после сброса)
+    ref_counted: Mapped[bool] = mapped_column(Boolean, default=False)
     ref_top_counted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Telegram Premium — такой ник выделяется жирным везде (utils.nick / mention / public_name)
     is_premium: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
-    # админ вручную убрал человека из топов (бан тоже убирает автоматически)
     hide_top: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
-    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)  # пользователь заблокировал бота
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     last_active: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -56,10 +52,8 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
     url: Mapped[str] = mapped_column(String(500))
-    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)  # есть -> автопроверка подписки
-    # own — задание админа; traffy / piarflow — задание от рекламной сети (создаётся само, проверяет сеть)
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     source: Mapped[str] = mapped_column(String(12), default="own", server_default="own")
-    # индивидуальная награда за задание в сотых долях звезды; None — стандартная из настроек
     reward: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -72,12 +66,11 @@ class UserTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     task_id: Mapped[int] = mapped_column(Integer, index=True)
-    status: Mapped[str] = mapped_column(String(10))  # done / skipped
+    status: Mapped[str] = mapped_column(String(10))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Channel(Base):
-    """Каналы обязательной подписки."""
 
     __tablename__ = "channels"
 
@@ -85,14 +78,11 @@ class Channel(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     title: Mapped[str] = mapped_column(String(200))
     url: Mapped[str] = mapped_column(String(500))
-    # True — бот сам проверяет подписку (нужен админом в канале); False — после «Я подписался» просто ждёт N секунд
     check_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
-    # True — это не канал, а произвольная ссылка (сайт, бот, соцсеть): подписку не проверить, всегда «ждём 10 секунд»
     is_link: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class ChannelPass(Base):
-    """Человек подтвердил подписку на канал без проверки (прошёл ожидание) — повторно не спрашиваем."""
 
     __tablename__ = "channel_passes"
     __table_args__ = (UniqueConstraint("user_id", "channel_id", name="uq_channel_pass"),)
@@ -104,7 +94,6 @@ class ChannelPass(Base):
 
 
 class ChannelMiss(Base):
-    """Человек был не подписан на канал с проверкой, когда увидел стену подписки. Нужен, чтобы засчитать подписку «с нашего бота»."""
 
     __tablename__ = "channel_misses"
     __table_args__ = (UniqueConstraint("user_id", "channel_id", name="uq_channel_miss"),)
@@ -119,29 +108,27 @@ class Transaction(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    amount: Mapped[int] = mapped_column(Integer)  # со знаком, в сотых долях
-    kind: Mapped[str] = mapped_column(String(20))  # task / referral / deduct / bonus
+    amount: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(20))
     note: Mapped[str] = mapped_column(String(300), default="")
     admin_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Withdrawal(Base):
-    """Заявка на вывод. id и есть уникальный номер заявки."""
 
     __tablename__ = "withdrawals"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    amount: Mapped[int] = mapped_column(Integer)  # сотые доли звезды
-    status: Mapped[str] = mapped_column(String(10), default="pending", index=True)  # pending / done / rejected
+    amount: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(10), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class WithdrawalNotice(Base):
-    """Сообщения админам о заявке — чтобы после закрытия обновить их у всех."""
 
     __tablename__ = "withdrawal_notices"
 
@@ -152,17 +139,16 @@ class WithdrawalNotice(Base):
 
 
 class Check(Base):
-    """Чек: админ создаёт, люди активируют по ссылке и получают звёзды на баланс в боте."""
 
     __tablename__ = "checks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
-    per_person: Mapped[int] = mapped_column(Integer)  # сотые доли звезды — сколько получает один человек
-    max_people: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # None — без лимита по людям
-    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # None — без лимита по времени
+    per_person: Mapped[int] = mapped_column(Integer)
+    max_people: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     password: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    channels: Mapped[str] = mapped_column(Text, default="[]")  # JSON: каналы, на которые надо быть подписанным
+    channels: Mapped[str] = mapped_column(Text, default="[]")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     activations: Mapped[int] = mapped_column(Integer, default=0)
     created_by: Mapped[int] = mapped_column(BigInteger)
@@ -181,7 +167,6 @@ class CheckActivation(Base):
 
 
 class FraudEvent(Base):
-    """Сигнал подозрительности. Очки пользователя = сумма points его событий (см. fraud.py)."""
 
     __tablename__ = "fraud_events"
 
@@ -194,19 +179,17 @@ class FraudEvent(Base):
 
 
 class OldReferral(Base):
-    """Награда за «старого друга»: уже был в боте, но неделю не заходил. Один человек — один раз за всё время (unique invited_id)."""
 
     __tablename__ = "old_referrals"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     inviter_id: Mapped[int] = mapped_column(BigInteger, index=True)
     invited_id: Mapped[int] = mapped_column(BigInteger, unique=True)
-    amount: Mapped[int] = mapped_column(Integer)  # сотые доли звезды
+    amount: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
 class Setting(Base):
-    """Настройки, которые админ меняет из бота (награды, суммы вывода, контакт)."""
 
     __tablename__ = "settings"
 
@@ -222,7 +205,7 @@ if config.DB_URL.startswith("sqlite"):
     from sqlalchemy import event
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _sqlite_pragmas(dbapi_conn, _rec):  # WAL: чтение не блокируется записью — меньше «database is locked» и лагов
+    def _sqlite_pragmas(dbapi_conn, _rec):
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
@@ -232,7 +215,6 @@ if config.DB_URL.startswith("sqlite"):
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # create_all не добавляет колонки в уже существующие таблицы — дописываем вручную, данные остаются
         cols = await conn.run_sync(lambda c: {col["name"] for col in inspect(c).get_columns("channels")})
         if "check_enabled" not in cols:
             default = "1" if config.DB_URL.startswith("sqlite") else "TRUE"
@@ -241,7 +223,6 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE channels ADD COLUMN is_link BOOLEAN NOT NULL DEFAULT " + ("0" if config.DB_URL.startswith("sqlite") else "FALSE")))
         ucols = await conn.run_sync(lambda c: {col["name"] for col in inspect(c).get_columns("users")})
         if "ref_top_counted" not in ucols:
-            # у всех существующих значение 0 -> топ рефералов начинается с нуля
             await conn.execute(text("ALTER TABLE users ADD COLUMN ref_top_counted BOOLEAN NOT NULL DEFAULT " + ("0" if config.DB_URL.startswith("sqlite") else "FALSE")))
         if "is_premium" not in ucols:
             await conn.execute(text("ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT " + ("0" if config.DB_URL.startswith("sqlite") else "FALSE")))
